@@ -24,16 +24,19 @@ from unstructured.partition.text import partition_text
 def classify_element(element: Element) -> str:
     """
     Classifies an unstructured element into one of the 5 UI categories:
-    'title', 'text', 'table', 'image', or 'other'.
+    'table', 'image', 'title', 'text', or 'other'.
+    
+    CRITICAL: In unstructured, Table and Image inherit from Text.
+    Therefore, Table and Image MUST be checked BEFORE Text!
     """
-    if isinstance(element, (Title, Header)):
-        return "title"
-    elif isinstance(element, (NarrativeText, ListItem, Text, CodeSnippet)):
-        return "text"
-    elif isinstance(element, Table):
+    if isinstance(element, Table):
         return "table"
     elif isinstance(element, (Image, FigureCaption)):
         return "image"
+    elif isinstance(element, (Title, Header)):
+        return "title"
+    elif isinstance(element, (NarrativeText, ListItem, CodeSnippet, Text)):
+        return "text"
     else:
         return "other"
 
@@ -44,7 +47,6 @@ def parse_csv_file(file_path: Path) -> List[Dict[str, Any]]:
     generating both readable markdown and HTML representations.
     """
     df = pd.read_csv(file_path)
-    # Generate markdown table string
     table_markdown = df.to_markdown(index=False)
     table_html = df.to_html(index=False, classes="table table-striped")
     
@@ -61,6 +63,53 @@ def parse_csv_file(file_path: Path) -> List[Dict[str, Any]]:
         }
     }
     return [element_dict]
+
+
+def extract_docx_embedded_images(file_path: Path) -> List[Dict[str, Any]]:
+    """Extracts embedded images from Word documents using python-docx."""
+    image_elements = []
+    try:
+        import docx
+        doc = docx.Document(file_path)
+        for rel in doc.part.rels.values():
+            if "image" in rel.target_ref:
+                img_name = Path(rel.target_ref).name
+                image_elements.append({
+                    "type": "image",
+                    "element_class": "Image",
+                    "text": f"[Embedded Visual / Diagram: {img_name} in {file_path.name}]",
+                    "metadata": {
+                        "page_number": 1,
+                        "filename": file_path.name,
+                        "text_as_html": None,
+                    }
+                })
+    except Exception:
+        pass
+    return image_elements
+
+
+def extract_pdf_embedded_images(file_path: Path) -> List[Dict[str, Any]]:
+    """Extracts embedded images from PDF documents using pypdf."""
+    image_elements = []
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(file_path)
+        for page_idx, page in enumerate(reader.pages):
+            for img in page.images:
+                image_elements.append({
+                    "type": "image",
+                    "element_class": "Image",
+                    "text": f"[Embedded Figure: {img.name} on Page {page_idx + 1}]",
+                    "metadata": {
+                        "page_number": page_idx + 1,
+                        "filename": file_path.name,
+                        "text_as_html": None,
+                    }
+                })
+    except Exception:
+        pass
+    return image_elements
 
 
 def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
@@ -80,6 +129,7 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
     path = Path(file_path)
     extension = path.suffix.lower()
     raw_elements: List[Element] = []
+    extra_images: List[Dict[str, Any]] = []
 
     if extension == ".csv":
         parsed_elements = parse_csv_file(path)
@@ -93,11 +143,13 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
         except Exception:
             from unstructured.partition.auto import partition
             raw_elements = partition(filename=str(path))
+        extra_images = extract_pdf_embedded_images(path)
     elif extension in [".docx", ".doc"]:
         raw_elements = partition_docx(
             filename=str(path),
             infer_table_structure=True,
         )
+        extra_images = extract_docx_embedded_images(path)
     elif extension in [".txt", ".md"]:
         raw_elements = partition_text(filename=str(path))
     else:
@@ -122,6 +174,13 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
                     "text_as_html": table_html,
                 }
             })
+
+    # Append any detected embedded images from document structure
+    if extra_images:
+        # Check if unstructured didn't already produce Image elements
+        existing_images = sum(1 for el in parsed_elements if el["type"] == "image")
+        if existing_images == 0:
+            parsed_elements.extend(extra_images)
 
     # Filter out empty text elements
     parsed_elements = [el for el in parsed_elements if el["text"] or el["type"] in ["table", "image"]]

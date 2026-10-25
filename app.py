@@ -303,6 +303,9 @@ def render_pipeline_inspector(project_id: str, filename: str):
         with c5:
             st.markdown(f"<div class='metric-box'><div class='metric-value'>{part_stats.get('other_elements', 0)}</div><div class='metric-label'>Other elements</div></div>", unsafe_allow_html=True)
 
+        total_atomic = part_stats.get('total_elements', 0)
+        st.caption(f"💡 Total atomic elements discovered: **{total_atomic}** ({part_stats.get('text_sections', 0)} text + {part_stats.get('titles_headers', 0)} titles/headers + {part_stats.get('tables', 0)} tables + {part_stats.get('images', 0)} images).")
+
         st.markdown("<div class='success-banner'>✔ Step completed successfully</div>", unsafe_allow_html=True)
 
     # 2. Chunking Tab
