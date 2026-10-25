@@ -1,0 +1,28 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Environment Variables & API Keys (CRITICAL: Never commit keys)
+.env
+.env.local
+
+# Local Data, Uploads & Vector Databases
+data/
+*.sqlite3
+*.parquet
+
+# Streamlit runtime data
+.streamlit/
+
+# OS specific files
+.DS_Store
+Thumbs.db
