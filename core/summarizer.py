@@ -33,7 +33,7 @@ def get_llm_client() -> Optional[ChatOpenAI]:
     try:
         return ChatOpenAI(
             model=DEFAULT_LLM_MODEL,
-            temperature=0.0,
+            temperature=0.2,
             api_key=api_key,
         )
     except Exception:

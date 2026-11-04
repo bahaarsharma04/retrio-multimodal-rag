@@ -141,8 +141,28 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
                 infer_table_structure=True,
             )
         except Exception:
-            from unstructured.partition.auto import partition
-            raw_elements = partition(filename=str(path))
+            raw_elements = []
+
+        # Robust Fallback: If layout partitioning produced 0 elements (common in template resumes / complex PDFs),
+        # extract text per page and partition semantically
+        if not raw_elements:
+            try:
+                import pypdf
+                from unstructured.documents.elements import ElementMetadata
+                reader = pypdf.PdfReader(path)
+                for page_idx, page in enumerate(reader.pages):
+                    p_text = page.extract_text() or ""
+                    if p_text.strip():
+                        page_els = partition_text(text=p_text)
+                        for el in page_els:
+                            if el.metadata is None:
+                                el.metadata = ElementMetadata(page_number=page_idx + 1)
+                            else:
+                                el.metadata.page_number = page_idx + 1
+                        raw_elements.extend(page_els)
+            except Exception:
+                pass
+
         extra_images = extract_pdf_embedded_images(path)
     elif extension in [".docx", ".doc"]:
         raw_elements = partition_docx(
@@ -194,5 +214,6 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
         "other_elements": sum(1 for el in parsed_elements if el["type"] == "other"),
         "total_elements": len(parsed_elements),
     }
+    print(f"Parsed {len(parsed_elements)} elements from {path.name}: {stats}")
 
     return parsed_elements, stats

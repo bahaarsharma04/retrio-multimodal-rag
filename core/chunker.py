@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from typing import List, Dict, Any, Tuple
 from core.config import (
@@ -13,13 +14,30 @@ def create_chunk_object(
     page_numbers: List[int],
     merged_elements_count: int,
     extra_metadata: Dict[str, Any] = None,
+    seen_hashes: Dict[str, int] = None,
 ) -> Dict[str, Any]:
     """Helper to construct a standardized chunk dictionary with complete metadata."""
     clean_text = content.strip()
     pages = sorted(list(set(page_numbers))) if page_numbers else [1]
     
+    # Deterministic SHA-256 chunk ID based on the content itself
+    if clean_text:
+        base_hash = hashlib.sha256(clean_text.encode("utf-8")).hexdigest()[:12]
+    else:
+        fallback_str = f"{filename}_{pages[0]}_{merged_elements_count}_{uuid.uuid4().hex[:6]}"
+        base_hash = hashlib.sha256(fallback_str.encode("utf-8")).hexdigest()[:12]
+
+    if seen_hashes is not None:
+        count = seen_hashes.get(base_hash, 0)
+        seen_hashes[base_hash] = count + 1
+        content_hash = base_hash if count == 0 else f"{base_hash}_{count}"
+    else:
+        content_hash = base_hash
+
+    chunk_id = f"chunk_{content_hash}"
+
     chunk = {
-        "chunk_id": f"chunk_{uuid.uuid4().hex[:8]}",
+        "chunk_id": chunk_id,
         "type": chunk_type,  # 'text', 'table', or 'image'
         "content": clean_text,
         "char_count": len(clean_text),
@@ -59,6 +77,7 @@ def chunk_elements(
         }
 
     chunks: List[Dict[str, Any]] = []
+    seen_hashes: Dict[str, int] = {}
     
     # State tracking for the currently accumulated text chunk
     current_text_parts: List[str] = []
@@ -77,6 +96,7 @@ def chunk_elements(
                     filename=current_filename,
                     page_numbers=current_pages,
                     merged_elements_count=current_merged_count,
+                    seen_hashes=seen_hashes,
                 )
                 chunks.append(chunk)
             current_text_parts = []
@@ -101,6 +121,7 @@ def chunk_elements(
                 page_numbers=[el_page],
                 merged_elements_count=1,
                 extra_metadata={"text_as_html": table_html},
+                seen_hashes=seen_hashes,
             )
             chunks.append(table_chunk)
             continue
@@ -114,6 +135,7 @@ def chunk_elements(
                 filename=el_filename,
                 page_numbers=[el_page],
                 merged_elements_count=1,
+                seen_hashes=seen_hashes,
             )
             chunks.append(image_chunk)
             continue
@@ -157,4 +179,5 @@ def chunk_elements(
         },
     }
 
+    print(f"Chunking complete: {total_chunks} chunks created from {total_atomic} elements. Avg chunk size: {avg_size} chars.")
     return chunks, stats

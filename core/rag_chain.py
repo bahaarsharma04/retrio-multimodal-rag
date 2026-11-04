@@ -35,7 +35,8 @@ def format_context_block(sources: List[Dict[str, Any]]) -> str:
             snippet_body = content
 
         formatted_parts.append(f"{src_header}\n{snippet_body}\n")
-
+        print(f"Formatted snippet {i+1}: {len(snippet_body)} characters from {s.get('filename', 'doc')} (Page {s.get('page_number', 1)})")
+        
     return "\n".join(formatted_parts)
 
 
@@ -51,6 +52,7 @@ def format_chat_history_block(chat_history: Optional[List[Dict[str, Any]]]) -> s
         content = msg.get("content", "").strip()
         history_lines.append(f"{role}: {content}")
 
+    print(f"Formatted chat history with {len(recent_turns)} turns.")
     return "\n".join(history_lines)
 
 

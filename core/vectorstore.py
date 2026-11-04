@@ -108,14 +108,25 @@ def index_chunks(
     documents: List[Document] = []
     ids: List[str] = []
 
+    seen_ids = set()
     for idx, c in enumerate(chunks):
         # We index the enriched text (summary + raw content) for optimal search
         content_to_index = c.get("indexed_text") or c.get("content", "")
         
+        # Ensure unique IDs across the batch to avoid chromadb.errors.DuplicateIDError
+        base_id = c.get("chunk_id", f"c_{idx}")
+        cid = base_id
+        counter = 1
+        while cid in seen_ids:
+            cid = f"{base_id}_{counter}"
+            counter += 1
+        seen_ids.add(cid)
+        c["chunk_id"] = cid
+
         doc = Document(
             page_content=content_to_index,
             metadata={
-                "chunk_id": c.get("chunk_id", f"c_{idx}"),
+                "chunk_id": cid,
                 "type": c.get("type", "text"),
                 "filename": c.get("filename", "unknown"),
                 "page_number": c.get("page_number", 1),
@@ -126,7 +137,7 @@ def index_chunks(
             }
         )
         documents.append(doc)
-        ids.append(c.get("chunk_id", f"c_{idx}"))
+        ids.append(cid)
 
         if progress_callback:
             progress_callback(idx + 1, len(chunks))

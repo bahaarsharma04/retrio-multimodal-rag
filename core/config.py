@@ -15,9 +15,10 @@ PROJECTS_DIR = DATA_DIR / "projects"
 DATA_DIR.mkdir(exist_ok=True)
 PROJECTS_DIR.mkdir(exist_ok=True)
 
-# API Keys
+# API Keys & Database
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/retrio_db")
 
 # Model Configurations
 DEFAULT_LLM_MODEL = "gpt-4o-mini"

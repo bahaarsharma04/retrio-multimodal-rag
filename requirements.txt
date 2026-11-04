@@ -1,5 +1,12 @@
-# Core Web Framework
+# Core Web & REST API Frameworks
 streamlit>=1.40.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# Database, ORM & Migrations (PostgreSQL)
+sqlalchemy>=2.0.30
+alembic>=1.14.0
+psycopg2-binary>=2.9.10
 
 # LLM & RAG Orchestration
 langchain>=0.3.0

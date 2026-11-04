@@ -9,6 +9,8 @@ from core.pipeline import (
     run_ingestion_pipeline,
     load_document_pipeline_data,
     get_project_docs_dir,
+    get_document_record_path,
+    get_interrupted_documents,
     delete_source_document,
 )
 from core.rag_chain import generate_rag_response
@@ -673,8 +675,9 @@ def render_retrio_home(project_id: str):
         if uploaded_file is not None:
             save_dir = get_project_docs_dir(project_id)
             saved_file_path = save_dir / uploaded_file.name
+            pipe_record = get_document_record_path(project_id, uploaded_file.name)
 
-            if not saved_file_path.exists():
+            if not saved_file_path.exists() or not pipe_record.exists():
                 with open(saved_file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
@@ -691,10 +694,47 @@ def render_retrio_home(project_id: str):
 
         st.markdown("---")
 
+        # Section: Paused / Interrupted Ingestions
+        interrupted_docs = get_interrupted_documents(project_id)
+        if interrupted_docs:
+            st.markdown("##### ⚠️ Paused Ingestions")
+            for item in interrupted_docs:
+                fname = item["filename"]
+                lstage = item["last_stage"].capitalize()
+                fpath = get_project_docs_dir(project_id) / fname
+
+                st.warning(f"**`{fname}`** paused after: **{lstage}**")
+                col_res, col_disc = st.columns([1, 1])
+                with col_res:
+                    if st.button(f"▶ Resume", key=f"res_{fname}", type="primary", use_container_width=True):
+                        progress_bar = st.progress(0, text="Resuming ingestion from checkpoint...")
+                        def on_resume_progress(stage_name, step, total):
+                            pct = int((step / total) * 100)
+                            progress_bar.progress(pct, text=f"Executing {stage_name} ({step}/{total})...")
+
+                        with st.spinner(f"Resuming `{fname}`..."):
+                            run_ingestion_pipeline(project_id, fpath, progress_callback=on_resume_progress)
+                            st.success(f"`{fname}` completed and indexed into ChromaDB!")
+                            st.rerun()
+                with col_disc:
+                    if st.button(f"🗑️ Discard", key=f"disc_{fname}", use_container_width=True):
+                        delete_source_document(project_id, fname)
+                        st.info(f"Discarded `{fname}`")
+                        st.rerun()
+
+            st.markdown("---")
+
         # Section: Sources List (Click source to open pipeline directly + 3-dots delete menu)
         st.markdown("##### Sources")
         docs_dir = get_project_docs_dir(project_id)
-        source_files = [f for f in docs_dir.iterdir() if f.is_file() and not f.name.endswith(".pipeline.json")]
+        interrupted_filenames = {item["filename"] for item in interrupted_docs}
+        source_files = [
+            f for f in docs_dir.iterdir()
+            if f.is_file()
+            and not f.name.endswith(".pipeline.json")
+            and not f.name.endswith(".checkpoint.json")
+            and f.name not in interrupted_filenames
+        ]
 
         if not source_files:
             st.info("No sources added yet. Drop a file above to index it!")
