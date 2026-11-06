@@ -1,10 +1,12 @@
+import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.schemas import HealthResponse
 from api.routers import chat, projects, documents
 from db.session import init_db, is_db_connected
+from core.logger import app_logger
 
 
 @asynccontextmanager
@@ -12,9 +14,9 @@ async def lifespan(app: FastAPI):
     # Startup: ensure DB tables exist if PostgreSQL is available
     if is_db_connected():
         init_db()
-        print("Connected to database successfully.")
+        app_logger.info("Connected to PostgreSQL database successfully.")
     else:
-        print("Database not reachable at startup; operating in JSON fallback mode.")
+        app_logger.info("PostgreSQL database not reachable; operating in local JSON fallback mode.")
     yield
 
 
@@ -35,6 +37,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_requests_middleware(request: Request, call_next):
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    app_logger.info(f"{request.method} {request.url.path} - Status: {response.status_code} ({elapsed_ms:.1f}ms)")
+    return response
 
 # Include API Routers
 app.include_router(chat.router)

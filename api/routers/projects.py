@@ -1,7 +1,7 @@
 from typing import List
 from fastapi import APIRouter, HTTPException, Path, status
 from api.schemas import ProjectCreateRequest, ProjectResponse
-from core.projects import list_projects, create_project, get_project
+from core.projects import list_projects, create_project, get_project, delete_project
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
@@ -26,3 +26,23 @@ def get_project_by_id(project_id: str = Path(..., description="Project workspace
             detail=f"Project with ID '{project_id}' not found.",
         )
     return proj
+
+
+@router.delete("/{project_id}", summary="Delete a project workspace and all its data")
+def delete_project_by_id(project_id: str = Path(..., description="Project workspace ID")):
+    proj = get_project(project_id)
+    if not proj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project with ID '{project_id}' not found.",
+        )
+    success = delete_project(project_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete project '{project_id}'.",
+        )
+    return {
+        "message": f"Project '{project_id}' and all associated data deleted successfully.",
+        "project_id": project_id,
+    }

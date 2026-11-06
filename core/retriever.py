@@ -1,4 +1,5 @@
 import os
+import time
 from typing import List, Dict, Any, Optional
 from rank_bm25 import BM25Okapi
 
@@ -8,6 +9,7 @@ from core.config import (
     RERANK_TOP_N,
 )
 from core.vectorstore import get_project_vectorstore, get_all_chunks
+from core.logger import retrieval_logger
 
 
 class HybridRetriever:
@@ -34,7 +36,9 @@ class HybridRetriever:
     def _dense_search(self, query: str, k: int) -> List[Dict[str, Any]]:
         """Performs semantic similarity search via ChromaDB."""
         if not self.chunks:
+            retrieval_logger.warning(f"Dense search skipped for Project '{self.project_id}': no chunks indexed.")
             return []
+        t0 = time.perf_counter()
         try:
             results = self.vectorstore.similarity_search_with_score(query, k=k)
             dense_docs = []
@@ -49,15 +53,21 @@ class HybridRetriever:
                     "summary": meta.get("summary") or None,
                     "score": float(score) if score is not None else 0.0,
                 })
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            top_score = f"{dense_docs[0]['score']:.4f}" if dense_docs else "None"
+            retrieval_logger.info(f"Dense search: retrieved {len(dense_docs)} chunks in {elapsed_ms:.1f}ms | Top distance/score: {top_score}")
             return dense_docs
-        except Exception:
+        except Exception as e:
+            retrieval_logger.error(f"Dense search failed: {e}", exc_info=True)
             return []
 
     def _sparse_search(self, query: str, k: int) -> List[Dict[str, Any]]:
         """Performs lexical BM25 keyword search across all indexed chunks."""
         if not self.bm25 or not self.chunks:
+            retrieval_logger.warning(f"BM25 search skipped for Project '{self.project_id}': index is empty.")
             return []
         
+        t0 = time.perf_counter()
         query_tokens = query.lower().split()
         if not query_tokens:
             return []
@@ -78,6 +88,9 @@ class HybridRetriever:
                     "summary": c.get("summary"),
                     "score": float(scores[idx]),
                 })
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        top_score = f"{sparse_docs[0]['score']:.4f}" if sparse_docs else "0.0"
+        retrieval_logger.info(f"BM25 search: retrieved {len(sparse_docs)} chunks in {elapsed_ms:.1f}ms | Tokens: {query_tokens[:5]} | Top score: {top_score}")
         return sparse_docs
 
     def _reciprocal_rank_fusion(
@@ -98,8 +111,13 @@ class HybridRetriever:
             doc_map[cid] = doc
             rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (k_constant + rank + 1))
 
+        dense_cids = set(doc_map.keys())
+        overlap_count = 0
+
         for rank, doc in enumerate(sparse_results):
             cid = doc.get("chunk_id") or doc.get("content")[:50]
+            if cid in dense_cids:
+                overlap_count += 1
             if cid not in doc_map:
                 doc_map[cid] = doc
             rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (k_constant + rank + 1))
@@ -113,6 +131,9 @@ class HybridRetriever:
             item["rrf_score"] = rrf_scores[cid]
             item["retrieval_method"] = "hybrid_rrf"
             fused.append(item)
+
+        top_rrf = f"{fused[0]['rrf_score']:.5f}" if fused else "0.0"
+        retrieval_logger.info(f"RRF fusion: merged {len(dense_results)} dense + {len(sparse_results)} sparse into {len(fused)} candidates ({overlap_count} overlapping boosts) | Top RRF: {top_rrf}")
         return fused
 
     def _rerank_with_cohere(
@@ -127,8 +148,10 @@ class HybridRetriever:
         """
         api_key = os.getenv("COHERE_API_KEY") or COHERE_API_KEY
         if not api_key or "your-cohere" in api_key or not candidates:
+            retrieval_logger.info("Cohere rerank bypassed (no API key configured or empty candidates); using RRF order.")
             return candidates[:top_n]
 
+        t0 = time.perf_counter()
         try:
             import cohere
             co = cohere.ClientV2(api_key=api_key)
@@ -147,9 +170,13 @@ class HybridRetriever:
                 original_doc["rerank_score"] = float(item.relevance_score)
                 original_doc["retrieval_method"] = "cohere_reranked"
                 reranked.append(original_doc)
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            top_rel = f"{reranked[0]['rerank_score']:.4f}" if reranked else "0.0"
+            retrieval_logger.info(f"Cohere rerank v3.5 completed in {elapsed_ms:.1f}ms: {len(candidates)} candidates -> {len(reranked)} top chunks | Top relevance: {top_rel}")
             return reranked
-        except Exception:
-            # Safe fallback to top RRF candidates
+        except Exception as e:
+            retrieval_logger.warning(f"Cohere rerank failed ({e}); falling back to top {top_n} RRF candidates.")
             return candidates[:top_n]
 
     def retrieve(
@@ -165,6 +192,9 @@ class HybridRetriever:
         3. Reciprocal Rank Fusion (RRF)
         4. Neural Reranking (Cohere or RRF fallback)
         """
+        t0 = time.perf_counter()
+        retrieval_logger.info(f"Retrieval initiated for Project: {self.project_id} | Query: '{query[:80]}...'")
+
         dense_docs = self._dense_search(query, k=top_k)
         sparse_docs = self._sparse_search(query, k=top_k)
 
@@ -173,4 +203,7 @@ class HybridRetriever:
 
         # Apply two-stage reranker
         final_results = self._rerank_with_cohere(query, fused_candidates, top_n=top_n)
+
+        total_ms = (time.perf_counter() - t0) * 1000
+        retrieval_logger.info(f"✔ Retrieval pipeline completed in {total_ms:.1f}ms: returned {len(final_results)} chunks to LLM.")
         return final_results

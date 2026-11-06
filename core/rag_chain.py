@@ -1,10 +1,12 @@
 import os
+import time
 from typing import List, Dict, Any, Optional
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 
 from core.config import DEFAULT_LLM_MODEL, OPENAI_API_KEY
 from core.retriever import HybridRetriever
+from core.logger import generation_logger
 
 RAG_SYSTEM_PROMPT = """You are Retrio, an advanced technical AI assistant answering questions using a multi-modal knowledge base.
 You are provided with verified context snippets extracted from documents (including narrative text, tables, and figure descriptions) as well as the recent conversation history.
@@ -69,14 +71,19 @@ def generate_rag_response(
     2. Context & Conversation History Formatting
     3. Grounded LLM Response Generation (gpt-4o-mini)
     """
+    t_start = time.perf_counter()
+    generation_logger.info(f"RAG Chain query received for Project: {project_id} | Query: '{query[:80]}' | History turns: {len(chat_history or [])}")
+
     retriever = HybridRetriever(project_id)
     retrieved_sources = retriever.retrieve(query=query, top_k=top_k, top_n=top_n)
 
     formatted_context = format_context_block(retrieved_sources)
     formatted_history = format_chat_history_block(chat_history)
+    generation_logger.info(f"Context formatted: {len(formatted_context)} chars from {len(retrieved_sources)} snippets | History context: {len(formatted_history)} chars")
 
     api_key = os.getenv("OPENAI_API_KEY") or OPENAI_API_KEY
     if not api_key or "your-openai" in api_key:
+        generation_logger.warning("OPENAI_API_KEY is not configured; using offline demo response preview.")
         sources_summary = "\n".join([
             f"- [{s.get('type', 'text').upper()}] {s.get('filename')} (Page {s.get('page_number')}): {s.get('content', '')[:120]}..."
             for s in retrieved_sources
@@ -115,8 +122,13 @@ def generate_rag_response(
             HumanMessage(content=full_user_prompt),
         ]
 
+        t_llm = time.perf_counter()
         response = llm.invoke(messages)
+        llm_ms = (time.perf_counter() - t_llm) * 1000
         answer_text = response.content.strip()
+
+        total_ms = (time.perf_counter() - t_start) * 1000
+        generation_logger.info(f"✔ LLM ({DEFAULT_LLM_MODEL}) generated {len(answer_text)} chars in {llm_ms:.1f}ms | Total RAG response time: {total_ms:.1f}ms")
 
         return {
             "query": query,
@@ -125,6 +137,7 @@ def generate_rag_response(
             "retrieval_method": retrieved_sources[0].get("retrieval_method", "hybrid_rrf") if retrieved_sources else "none",
         }
     except Exception as e:
+        generation_logger.error(f"❌ RAG generation failed: {e}", exc_info=True)
         return {
             "query": query,
             "answer": f"Error generating answer: {str(e)}",

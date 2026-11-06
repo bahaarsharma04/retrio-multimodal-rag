@@ -4,7 +4,7 @@ from pathlib import Path
 import streamlit as st
 
 from core.config import PROJECTS_DIR, OPENAI_API_KEY
-from core.projects import list_projects, create_project, get_project
+from core.projects import list_projects, create_project, get_project, delete_project
 from core.pipeline import (
     run_ingestion_pipeline,
     load_document_pipeline_data,
@@ -198,18 +198,19 @@ def choose_project_dialog():
     filtered = [p for p in projects if search.lower() in p.get("name", "").lower()] if search else projects
 
     for p in filtered:
-        is_current = (p.get("id") == st.session_state.active_project_id)
-        col_info, col_act = st.columns([7, 3])
+        p_id = p.get("id")
+        is_current = (p_id == st.session_state.active_project_id)
+        col_info, col_act, col_del = st.columns([6, 2.5, 1.5])
         with col_info:
             st.markdown(f"**{p.get('name')}**")
-            st.caption(f"{p.get('created_at')} • {p.get('description', '')[:50]}")
+            st.caption(f"{p.get('created_at')} • {p.get('description', '')[:45]}")
         with col_act:
             if is_current:
-                st.button("Active", disabled=True, key=f"active_{p.get('id')}", use_container_width=True)
+                st.button("Active", disabled=True, key=f"active_{p_id}", use_container_width=True)
             else:
-                if st.button("Select", key=f"sel_{p.get('id')}", use_container_width=True):
-                    st.session_state.active_project_id = p.get("id")
-                    chats = list_chats(p.get("id"))
+                if st.button("Select", key=f"sel_{p_id}", use_container_width=True):
+                    st.session_state.active_project_id = p_id
+                    chats = list_chats(p_id)
                     if chats:
                         first_chat = chats[0]
                         st.session_state.active_chat_id = first_chat["chat_id"]
@@ -221,6 +222,31 @@ def choose_project_dialog():
                         st.session_state.messages = []
                     st.session_state.inspecting_document = None
                     st.rerun()
+        with col_del:
+            if st.button("🗑️", key=f"del_{p_id}", help=f"Delete project '{p.get('name')}'", use_container_width=True):
+                delete_project(p_id)
+                # If deleted project was the currently active one, select another or clear
+                remaining = [proj for proj in list_projects() if proj.get("id") != p_id]
+                if st.session_state.active_project_id == p_id:
+                    if remaining:
+                        new_active = remaining[0]["id"]
+                        st.session_state.active_project_id = new_active
+                        chats = list_chats(new_active)
+                        if chats:
+                            st.session_state.active_chat_id = chats[0]["chat_id"]
+                            st.session_state.current_chat_title = chats[0]["title"]
+                            st.session_state.messages = chats[0].get("messages", [])
+                        else:
+                            st.session_state.active_chat_id = str(uuid.uuid4())
+                            st.session_state.current_chat_title = "New Chat"
+                            st.session_state.messages = []
+                    else:
+                        st.session_state.active_project_id = None
+                        st.session_state.active_chat_id = str(uuid.uuid4())
+                        st.session_state.current_chat_title = "New Chat"
+                        st.session_state.messages = []
+                    st.session_state.inspecting_document = None
+                st.rerun()
 
 
 @st.dialog("✨ Create New Project")
