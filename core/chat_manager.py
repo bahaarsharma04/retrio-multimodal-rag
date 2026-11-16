@@ -1,5 +1,4 @@
 import json
-import uuid
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -22,6 +21,7 @@ def get_project_chats_dir(project_id: str) -> Path:
 # ====================================================================
 
 def _list_chats_json(project_id: str) -> List[Dict[str, Any]]:
+    """Lists all stored JSON conversations for a project, sorted newest first."""
     chats_dir = get_project_chats_dir(project_id)
     chats = []
     for f in chats_dir.glob("*.json"):
@@ -36,6 +36,7 @@ def _list_chats_json(project_id: str) -> List[Dict[str, Any]]:
 
 
 def _get_chat_json(project_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
+    """Loads a single conversation from disk by project and chat ID."""
     chats_dir = get_project_chats_dir(project_id)
     chat_file = chats_dir / f"{chat_id}.json"
     if chat_file.exists():
@@ -53,6 +54,7 @@ def _save_chat_json(
     title: str,
     messages: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """Persists a conversation to disk as JSON."""
     chats_dir = get_project_chats_dir(project_id)
     chat_file = chats_dir / f"{chat_id}.json"
 
@@ -85,6 +87,7 @@ def _save_chat_json(
 
 
 def _rename_chat_json(project_id: str, chat_id: str, new_title: str) -> bool:
+    """Updates the title of a JSON conversation on disk."""
     chat = _get_chat_json(project_id, chat_id)
     if not chat:
         return False
@@ -98,6 +101,7 @@ def _rename_chat_json(project_id: str, chat_id: str, new_title: str) -> bool:
 
 
 def _delete_chat_json(project_id: str, chat_id: str) -> bool:
+    """Deletes a JSON conversation file from disk."""
     chat_file = get_project_chats_dir(project_id) / f"{chat_id}.json"
     if chat_file.exists():
         chat_file.unlink()

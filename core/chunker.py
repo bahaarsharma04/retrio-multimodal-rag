@@ -1,11 +1,29 @@
 import hashlib
 import time
+import re
 from typing import List, Dict, Any, Tuple
 from core.config import (
     MAX_CHUNK_CHARACTERS,
     COMBINE_UNDER_N_CHARS,
+    CHUNK_OVERLAP_CHARACTERS,
 )
 from core.logger import chunking_logger
+
+
+def extract_sentence_overlap(text_parts: List[str], max_overlap_chars: int = CHUNK_OVERLAP_CHARACTERS) -> List[str]:
+    """Extracts trailing sentence(s) to seed the next chunk, preventing boundary severing."""
+    if not text_parts:
+        return []
+    last_text = text_parts[-1].strip()
+    if len(last_text) <= max_overlap_chars:
+        return [last_text]
+    sentences = re.split(r"(?<=[.!?])\s+", last_text)
+    if len(sentences) >= 2:
+        candidate = " ".join(sentences[-2:])
+        if len(candidate) <= max_overlap_chars + 120:
+            return [candidate]
+        return [sentences[-1]]
+    return [last_text[-max_overlap_chars:]]
 
 
 def create_chunk_object(
@@ -33,6 +51,8 @@ def create_chunk_object(
     identity = f"{scope}:{chunk_type}:{content_digest}:{occurrence}"
     chunk_id = "chunk_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
+    section_name = (extra_metadata or {}).get("section", "General")
+
     chunk = {
         "chunk_id": chunk_id,
         "content_hash": content_digest,
@@ -43,6 +63,7 @@ def create_chunk_object(
         "page_range": f"{pages[0]}-{pages[-1]}" if len(pages) > 1 else str(pages[0]),
         "elements_merged": merged_elements_count,
         "filename": filename,
+        "section": section_name,
         "summary": None,  # Will be populated in Phase 2 Part 3 (Summarisation)
         "metadata": extra_metadata or {},
     }
@@ -89,8 +110,9 @@ def chunk_elements(
     current_text_parts: List[str] = []
     current_pages: List[int] = []
     current_merged_count = 0
+    current_section = "General"
 
-    def flush_text_chunk():
+    def flush_text_chunk(keep_overlap: bool = False):
         nonlocal current_text_parts, current_pages, current_merged_count
         if current_text_parts:
             combined_content = "\n\n".join(current_text_parts).strip()
@@ -101,13 +123,21 @@ def chunk_elements(
                     filename=current_filename,
                     page_numbers=current_pages,
                     merged_elements_count=current_merged_count,
+                    extra_metadata={"section": current_section} if current_section else {},
                     seen_hashes=seen_hashes,
                     source_key=source_key,
                 )
                 chunks.append(chunk)
-            current_text_parts = []
-            current_pages = []
-            current_merged_count = 0
+
+            if keep_overlap and current_text_parts:
+                overlap_seed = extract_sentence_overlap(current_text_parts)
+                current_text_parts = list(overlap_seed)
+                current_pages = [current_pages[-1]] if current_pages else [1]
+                current_merged_count = len(overlap_seed)
+            else:
+                current_text_parts = []
+                current_pages = []
+                current_merged_count = 0
 
     for el in elements:
         el_type = el.get("type", "text")
@@ -117,7 +147,7 @@ def chunk_elements(
 
         # Case 1: Table - keep intact as dedicated chunk
         if el_type == "table":
-            flush_text_chunk()
+            flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
             table_html = el.get("metadata", {}).get("text_as_html")
             table_chunk = create_chunk_object(
@@ -126,7 +156,7 @@ def chunk_elements(
                 filename=el_filename,
                 page_numbers=[el_page],
                 merged_elements_count=1,
-                extra_metadata={"text_as_html": table_html},
+                extra_metadata={"text_as_html": table_html, "section": current_section},
                 seen_hashes=seen_hashes,
                 source_key=source_key,
             )
@@ -135,7 +165,7 @@ def chunk_elements(
 
         # Case 2: Image - keep intact as dedicated chunk
         if el_type == "image":
-            flush_text_chunk()
+            flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
             image_chunk = create_chunk_object(
                 content=el_text or "[Image element detected]",
@@ -143,6 +173,7 @@ def chunk_elements(
                 filename=el_filename,
                 page_numbers=[el_page],
                 merged_elements_count=1,
+                extra_metadata={"section": current_section},
                 seen_hashes=seen_hashes,
                 source_key=source_key,
             )
@@ -151,10 +182,23 @@ def chunk_elements(
 
         # Case 3: Title - natural section boundary
         if el_type == "title":
+            clean_title = " ".join(el_text.split())
+            base_fname = re.sub(r"\.[^.]+$", "", el_filename).lower() if el_filename else ""
+            is_running_header = (
+                bool(re.search(r"\b(all rights reserved|copyright|page\s+\d+(\s+of\s+\d+)?)\b", clean_title, re.I))
+                or (len(base_fname) >= 4 and base_fname in clean_title.lower())
+            )
+            is_section_header = bool(re.match(
+                r"^(\d+(\.\d+)*\s+[A-Z]|Appendix|References|Table\s+[A-Z0-9]+|Figure\s+[A-Z0-9]+|[A-Z][a-zA-Z\s]{3,40}$)",
+                clean_title
+            ))
+            if is_section_header and not is_running_header and len(clean_title) < 100:
+                current_section = clean_title
+
             current_buffer_len = sum(len(p) for p in current_text_parts)
             # Only start a new chunk on a title if current buffer already has meaningful content
             if current_buffer_len >= COMBINE_UNDER_N_CHARS:
-                flush_text_chunk()
+                flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
             current_text_parts.append(el_text)
             current_pages.append(el_page)
@@ -164,18 +208,18 @@ def chunk_elements(
         # Case 4: Text or Other elements
         if el_text:
             if current_text_parts and el_filename != current_filename:
-                flush_text_chunk()
+                flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
             projected_len = sum(len(p) for p in current_text_parts) + len(el_text) + 2
             if projected_len > max_chars and current_text_parts:
-                flush_text_chunk()
+                flush_text_chunk(keep_overlap=True)
 
             current_text_parts.append(el_text)
             current_pages.append(el_page)
             current_merged_count += 1
 
     # Flush any remaining text elements
-    flush_text_chunk()
+    flush_text_chunk(keep_overlap=False)
 
     # Calculate statistics for the Chunking UI tab
     total_atomic = len(elements)

@@ -1,6 +1,5 @@
 import shutil
 from pathlib import Path
-from typing import List, Dict, Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, Path as FPath, status
 
 from core.projects import get_project
