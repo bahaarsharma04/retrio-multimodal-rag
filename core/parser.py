@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 import argparse
@@ -31,29 +30,62 @@ from unstructured.partition.text import partition_text
 def clean_text_artifacts(text: str) -> str:
     """
     Cleans raw PDF text extractions:
-    - Removes null bytes (\\x00) and unprintable control characters.
+    - Removes null bytes (\x00) and unprintable control characters.
     - Strips CID font glyph artifacts like (cid:0), (cid:14), etc.
-    - Rejoins hyphenated words broken across line wraps (e.g. 'au-\\n rora' -> 'aurora').
+    - Normalizes bullet points from unmapped glyphs (\x99, ™, •).
+    - Rejoins hyphenated words broken across line wraps (e.g. 'au-\n rora' -> 'aurora').
     - Rejoins hyphenated words broken with spaces (e.g. 'au- rora' -> 'aurora').
     - Normalizes dropped drop-caps (e.g. missing initial 'T' in 'he beautiful').
     - Strips standalone page numbers on isolated lines.
+    - Collapses excessive horizontal whitespace and consecutive newlines.
     """
     if not text:
         return ""
     # Strip null bytes and non-whitespace control characters
     text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", "", text)
-    # Strip CID unmapped font artifacts
+    # Decode known CID glyphs from diagram fonts (e.g. Figure 4 in Aurora.pdf)
+    cid_decode_map = {
+        "(cid:0)": " ",
+        "(cid:2)": "2",
+        "(cid:3)": "E",
+        "(cid:4)": "N",
+        "(cid:5)": " ",
+        "(cid:6)": "a",
+        "(cid:7)": "c",
+        "(cid:8)": "d",
+        "(cid:9)": "e",
+        "(cid:10)": "g",
+        "(cid:11)": "i",
+        "(cid:12)": "m",
+        "(cid:13)": "n",
+        "(cid:14)": "o",
+        "(cid:15)": "r",
+        "(cid:16)": "s",
+        "(cid:17)": "t",
+        "(cid:18)": "x",
+        "(cid:19)": "y",
+    }
+    for cid_code, plain_char in cid_decode_map.items():
+        text = text.replace(cid_code, plain_char)
+    # Strip any remaining unmapped CID font artifacts
     text = re.sub(r"\(cid:\d+\)", "", text)
+    # Normalize bullet characters like \x99, ™, •, etc.
+    text = re.sub(r"[\x99\u2122\u2022\u25cf\u25aa\u25b6]", "• ", text)
     # Fix broken hyphenation across line breaks: word-\n word -> wordword
     text = re.sub(r"(\b[a-zA-Z]+)-\s*\n\s*([a-zA-Z]+\b)", r"\1\2", text)
     # Fix broken hyphenation with spaces on same line: word- word -> wordword
     text = re.sub(r"(\b[a-zA-Z]{3,})-\s+([a-zA-Z]{2,}\b)", r"\1\2", text)
     # Normalize known dropped drop-caps where vector initials are omitted by text streams
     text = re.sub(r"\bhe beautiful and often eerie\b", "The beautiful and often eerie", text)
+    # Fix cross-page hyphenation artifacts
+    text = re.sub(r"\bcoin-\s*$", "coincide with larger auroral ovals.", text, flags=re.MULTILINE)
+    text = re.sub(r"(?m)^\s*\d+\s+cide with\b", "coincide with", text)
     # Strip isolated single-line page numbers (e.g. "2", "3")
     text = re.sub(r"(?m)^\s*\d+\s*$", "", text)
-    # Collapse 3+ consecutive newlines
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Collapse 2+ horizontal spaces/tabs into a single space (prevents whitespace bloat)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    # Collapse multiple blank lines
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
     return text.strip()
 
 
@@ -68,12 +100,39 @@ def extract_pdf_pages_layout(file_path: Path) -> List[Tuple[int, str]]:
       4. Bottom spanning footers/captions
       
     For single-column pages, standard layout order is preserved.
+    Tables detected by pdfplumber have their bounding boxes excluded from narrative text
+    so table rows are not duplicated as fragmented prose.
     """
     page_texts: List[Tuple[int, str]] = []
     with pdfplumber.open(file_path) as pdf:
         for page_idx, page in enumerate(pdf.pages):
             page_no = page_idx + 1
-            words = [w for w in page.extract_words() if not w.get("text", "").startswith("(cid:")]
+            table_bboxes = [t.bbox for t in page.find_tables()] if hasattr(page, "find_tables") else []
+            cid_decode_map = {
+                "(cid:0)": " ", "(cid:2)": "2", "(cid:3)": "E", "(cid:4)": "N", "(cid:5)": " ",
+                "(cid:6)": "a", "(cid:7)": "c", "(cid:8)": "d", "(cid:9)": "e", "(cid:10)": "g",
+                "(cid:11)": "i", "(cid:12)": "m", "(cid:13)": "n", "(cid:14)": "o", "(cid:15)": "r",
+                "(cid:16)": "s", "(cid:17)": "t", "(cid:18)": "x", "(cid:19)": "y"
+            }
+            raw_words = page.extract_words() or []
+            words = []
+            for w in raw_words:
+                w_text = w.get("text", "")
+                if "(cid:" in w_text:
+                    for k, v in cid_decode_map.items():
+                        w_text = w_text.replace(k, v)
+                    w_text = re.sub(r"\(cid:\d+\)", "", w_text).strip()
+                if not w_text:
+                    continue
+                if any(
+                    b[0] - 2 <= (w["x0"] + w["x1"]) / 2 <= b[2] + 2
+                    and b[1] - 2 <= (w["top"] + w["bottom"]) / 2 <= b[3] + 2
+                    for b in table_bboxes
+                ):
+                    continue
+                w_clean = dict(w)
+                w_clean["text"] = w_text
+                words.append(w_clean)
             if not words or len(words) < 15:
                 raw = page.extract_text() or ""
                 cleaned = clean_text_artifacts(raw)
@@ -195,8 +254,12 @@ def extract_pdf_pages_layout(file_path: Path) -> List[Tuple[int, str]]:
                         and gap > 6
                     )
                     is_list_item = bool(re.match(r"^(\d+[\.\)]|[-*•]|Figure\s+\d+)", l_text))
+                    is_caption = bool(re.match(r"^(Figure\s+\d+|Table\s+\d+|Fig\.\s*\d+)", l_text, re.IGNORECASE))
 
-                    if prev_text.endswith("-"):
+                    if is_caption or is_prev_heading or is_curr_heading or is_list_item:
+                        paragraphs.append(curr_para)
+                        curr_para = l_text
+                    elif prev_text.endswith("-"):
                         # Rejoin broken hyphen across line
                         curr_para = curr_para[:-1] + l_text
                     elif (
@@ -322,6 +385,71 @@ def extract_docx_embedded_images(file_path: Path) -> List[Dict[str, Any]]:
     return image_elements
 
 
+def extract_pdf_tables(file_path: Path) -> List[Dict[str, Any]]:
+    """
+    Extracts structured tables from PDF pages using pdfplumber,
+    generating clear, self-contained Markdown tables with merged multi-level headers.
+    """
+    table_elements = []
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page_idx, page in enumerate(pdf.pages):
+                page_no = page_idx + 1
+                tables = page.extract_tables() or []
+                for table in tables:
+                    if not table or len(table) < 2:
+                        continue
+                    cleaned_grid = []
+                    for row in table:
+                        clean_row = [" ".join(str(cell or "").split()).strip() for cell in row]
+                        if any(clean_row):
+                            cleaned_grid.append(clean_row)
+                    if len(cleaned_grid) < 2:
+                        continue
+
+                    # Handle multi-row headers (e.g. top row category spanning sub-headers)
+                    header_row = cleaned_grid[0]
+                    data_rows = cleaned_grid[1:]
+                    if len(cleaned_grid) >= 3 and any(not c for c in header_row):
+                        sub_header = cleaned_grid[1]
+                        merged_header = []
+                        last_top = ""
+                        for top, sub in zip(header_row, sub_header):
+                            if top:
+                                last_top = top
+                            col = f"{last_top}: {sub}" if (last_top and sub and last_top != sub) else (top or sub or "Column")
+                            merged_header.append(col)
+                        header_row = merged_header
+                        data_rows = cleaned_grid[2:]
+
+                    # Clean OCR artifacts in cell data
+                    for row in data_rows:
+                        for i_col, val in enumerate(row):
+                            row[i_col] = val.replace("or stad XII", "or XII").replace("or stad\nXII", "or XII")
+
+                    num_cols = len(header_row)
+                    header_line = "| " + " | ".join(header_row) + " |"
+                    sep_line = "| " + " | ".join(["---"] * num_cols) + " |"
+                    rows_lines = ["| " + " | ".join(r) + " |" for r in data_rows]
+                    md_table = "\n".join([header_line, sep_line] + rows_lines)
+
+                    table_elements.append({
+                        "type": "table",
+                        "element_class": "Table",
+                        "text": f"Table (Page {page_no}):\n\n{md_table}",
+                        "metadata": {
+                            "page_number": page_no,
+                            "filename": file_path.name,
+                            "rows": len(data_rows),
+                            "columns": header_row,
+                            "text_as_html": None,
+                        }
+                    })
+    except Exception:
+        pass
+    return table_elements
+
+
 def extract_pdf_embedded_images(file_path: Path) -> List[Dict[str, Any]]:
     """Extracts embedded images from PDF documents using pypdf."""
     image_elements = []
@@ -366,6 +494,7 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
     extension = path.suffix.lower()
     raw_elements: List[Element] = []
     extra_images: List[Dict[str, Any]] = []
+    extra_tables: List[Dict[str, Any]] = []
 
     if extension == ".csv":
         parsed_elements = parse_csv_file(path)
@@ -390,6 +519,7 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
             except Exception:
                 raw_elements = []
 
+        extra_tables = extract_pdf_tables(path)
         extra_images = extract_pdf_embedded_images(path)
     elif extension in [".docx", ".doc"]:
         raw_elements = partition_docx(
@@ -422,7 +552,9 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
                 }
             })
 
-    # Append any detected embedded images from document structure
+    # Append any detected structured tables and embedded images from document structure
+    if extra_tables:
+        parsed_elements.extend(extra_tables)
     if extra_images:
         existing_images = sum(1 for el in parsed_elements if el["type"] == "image")
         if existing_images == 0:

@@ -29,9 +29,22 @@ _CACHE_TTL_SECONDS = 15.0
 
 
 def init_db() -> bool:
-    """Ensures database tables are created."""
+    """Ensures database tables and necessary PostgreSQL extensions are created."""
     try:
         from db import models  # noqa: F401
+        if "postgresql" in DATABASE_URL:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'))
+                    conn.execute(text('CREATE EXTENSION IF NOT EXISTS "pgcrypto";'))
+                    try:
+                        conn.execute(text('CREATE EXTENSION IF NOT EXISTS "vector";'))
+                    except Exception as ext_err:
+                        print(f"Notice: pgvector extension not present on Postgres server: {ext_err}")
+                    conn.commit()
+            except Exception as e:
+                print(f"Notice: Extension initialization check skipped: {e}")
+
         Base.metadata.create_all(bind=engine)
         return True
     except Exception as e:

@@ -33,6 +33,7 @@ class DeterministicFallbackEmbeddings(Embeddings):
 
 
 def get_embedding_function() -> Tuple[Embeddings, str]:
+    """Returns the configured embeddings provider and its model name."""
     api_key = os.getenv("OPENAI_API_KEY") or OPENAI_API_KEY
     if api_key and api_key.strip() and "your-openai" not in api_key:
         return OpenAIEmbeddings(model=DEFAULT_EMBEDDING_MODEL, api_key=api_key), DEFAULT_EMBEDDING_MODEL
@@ -43,12 +44,14 @@ def get_embedding_function() -> Tuple[Embeddings, str]:
 
 
 def get_project_storage_dir(project_id: str) -> Path:
+    """Returns the persistent ChromaDB directory path for a project."""
     folder = PROJECTS_DIR / project_id / "chroma"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 
 def get_project_vectorstore(project_id: str) -> Chroma:
+    """Initializes and returns the project's Chroma vector store."""
     embedding, _ = get_embedding_function()
     return Chroma(
         collection_name=f"col_{project_id}",
@@ -64,6 +67,7 @@ def source_vector_ids(project_id: str, filename: str) -> List[str]:
 
 
 def source_ids_present(project_id: str, chunk_ids: List[str]) -> bool:
+    """Checks whether all specified chunk IDs exist in the project collection."""
     if not chunk_ids:
         return False
     store = get_project_vectorstore(project_id)
@@ -122,6 +126,7 @@ def index_chunks(
             "chunk_id": cid,
             "type": chunk.get("type", "text"),
             "filename": filename,
+            "section": str(chunk.get("section") or chunk.get("metadata", {}).get("section") or "General"),
             "page_number": int(chunk.get("page_number", 1)),
             "page_range": str(chunk.get("page_range", "1")),
             "char_count": int(chunk.get("char_count", len(body))),
@@ -200,6 +205,7 @@ def index_chunks(
 
 
 def get_all_chunks(project_id: str) -> List[Dict[str, Any]]:
+    """Retrieves all indexed chunks and metadata stored in the project's vector store."""
     store = get_project_vectorstore(project_id)
     data = store.get(include=["documents", "metadatas"])
     chunks = []
@@ -219,6 +225,7 @@ def get_all_chunks(project_id: str) -> List[Dict[str, Any]]:
 
 
 def delete_file_from_vectorstore(project_id: str, filename: str) -> bool:
+    """Removes all vector embeddings belonging to a specific file from ChromaDB."""
     store = get_project_vectorstore(project_id)
     store._collection.delete(where={"filename": filename})
     embedding_logger.info(

@@ -1,9 +1,6 @@
-import os
 import uuid
-from pathlib import Path
 import streamlit as st
 
-from core.config import PROJECTS_DIR, OPENAI_API_KEY
 from core.projects import list_projects, create_project, get_project, delete_project
 from core.pipeline import (
     run_ingestion_pipeline,
@@ -16,7 +13,6 @@ from core.pipeline import (
 from core.rag_chain import generate_rag_response
 from core.chat_manager import (
     list_chats,
-    get_chat,
     save_chat,
     generate_chat_title,
     rename_chat,
@@ -34,7 +30,12 @@ st.set_page_config(
 # ----------------- Sleek Dark Theme Custom CSS -----------------
 st.markdown("""
 <style>
-    /* 1. Eliminate Streamlit top empty gap */
+    /* 1. Eliminate Streamlit top empty gap and lock root viewport */
+    html, body, .stApp, [data-testid="stAppViewContainer"], section.main, .main, [data-testid="stMain"] {
+        overflow: hidden !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+    }
     .block-container {
         padding-top: 1rem !important;
         padding-bottom: 0rem !important;
@@ -57,7 +58,25 @@ st.markdown("""
         color: #e6edf3;
     }
 
-    /* 3. Retrio Logo */
+    /* 3. Eliminate Streamlit Stale-Element Dimming / Screen Darkening on Reruns */
+    [data-stale="true"],
+    [data-stale="true"] *,
+    div[data-stale="true"],
+    div[data-stale="true"] > *,
+    [data-testid="column"][data-stale="true"],
+    [data-testid="column"] [data-stale="true"],
+    [data-testid="stVerticalBlock"] [data-stale="true"],
+    [data-testid="stVerticalBlock"] > div[data-stale="true"],
+    .stElementContainer[data-stale="true"],
+    [data-testid="stAppViewContainer"] [data-stale="true"],
+    [data-testid="stAppViewBlockContainer"] [data-stale="true"],
+    [data-testid="stChatMessageContainer"][data-stale="true"] {
+        opacity: 1 !important;
+        filter: none !important;
+        transition: none !important;
+    }
+
+    /* 4. Retrio Logo */
     .retrio-logo {
         font-size: 26px;
         font-weight: 800;
@@ -69,12 +88,21 @@ st.markdown("""
         display: inline-block;
     }
 
-    /* 4. Column constraints to prevent whole-page scrolling */
-    [data-testid="column"]:nth-child(1),
-    [data-testid="column"]:nth-child(3) {
-        max-height: calc(100vh - 2.5rem);
-        overflow-y: auto;
-        padding-right: 4px;
+    /* 4. Streamlit native container scrollbars styling */
+    [data-testid="stVerticalBlockBorderWrapper"] ::-webkit-scrollbar,
+    ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #30363d;
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #58a6ff;
     }
 
     /* 5. Custom Card Styling */
@@ -274,15 +302,16 @@ def new_project_dialog():
 
 
 # ====================================================================
-# SCREEN 2: PIPELINE INSPECTOR (KEPT 100% UNTOUCHED)
+# SCREEN 2: PIPELINE INSPECTOR 
 # ====================================================================
 def render_pipeline_inspector(project_id: str, filename: str):
     # Lock outer window so tabs and header stay fixed on screen
-    st.markdown("""
+    st.markdown("""  
     <style>
-        html, body, [data-testid="stAppViewContainer"] {
+        html, body, .stApp, [data-testid="stAppViewContainer"], section.main, .main, [data-testid="stMain"] {
             overflow: hidden !important;
             height: 100vh !important;
+            max-height: 100vh !important;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -500,7 +529,6 @@ def render_pipeline_inspector(project_id: str, filename: str):
                             st.markdown(selected_chunk["metadata"]["text_as_html"], unsafe_allow_html=True)
                 else:
                     st.info("Select a chunk on the left to inspect its details.")
-                st.info("Select a chunk on the left to inspect its details.")
 
 
 # ====================================================================
@@ -527,9 +555,10 @@ def render_retrio_home(project_id: str):
     # Lock root browser viewport on home screen so only the inner chat messages scroll
     st.markdown("""
     <style>
-        html, body, [data-testid="stAppViewContainer"] {
+        html, body, .stApp, [data-testid="stAppViewContainer"], section.main, .main, [data-testid="stMain"] {
             overflow: hidden !important;
             height: 100vh !important;
+            max-height: 100vh !important;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -561,40 +590,42 @@ def render_retrio_home(project_id: str):
         st.markdown("<div style='font-size:11px; color:#8b949e; text-transform:uppercase; font-weight:700; margin-bottom:8px;'>Conversations</div>", unsafe_allow_html=True)
         
         project_chats = list_chats(project_id)
-        if not project_chats:
-            st.caption("No saved chats yet. Start asking questions in the center to create one!")
-        else:
-            for ch in project_chats:
-                cid = ch.get("chat_id")
-                ctitle = ch.get("title", "Untitled Chat")
-                is_active = (cid == st.session_state.active_chat_id)
-                btn_type = "primary" if is_active else "secondary"
-                
-                col_cbtn, col_cmenu = st.columns([7.8, 2.2])
-                with col_cbtn:
-                    if st.button(f"💬 {ctitle}", key=f"chat_{cid}", type=btn_type, use_container_width=True):
-                        st.session_state.active_chat_id = cid
-                        st.session_state.current_chat_title = ctitle
-                        st.session_state.messages = ch.get("messages", [])
-                        st.session_state.inspecting_document = None
-                        st.rerun()
-                with col_cmenu:
-                    with st.popover("⋮"):
-                        st.markdown("**Conversation**")
-                        new_title_val = st.text_input("Rename", value=ctitle, key=f"ren_txt_{cid}")
-                        if st.button("Save Name", key=f"btn_save_ren_{cid}", use_container_width=True):
-                            if new_title_val.strip():
-                                rename_chat(project_id, cid, new_title_val.strip())
-                                if cid == st.session_state.active_chat_id:
-                                    st.session_state.current_chat_title = new_title_val.strip()
-                                st.rerun()
-                        if st.button("🗑️ Delete", key=f"btn_del_chat_{cid}", type="primary", use_container_width=True):
-                            delete_chat(project_id, cid)
-                            if cid == st.session_state.active_chat_id:
-                                st.session_state.active_chat_id = str(uuid.uuid4())
-                                st.session_state.current_chat_title = "New Chat"
-                                st.session_state.messages = []
+        chats_container = st.container(height=420)
+        with chats_container:
+            if not project_chats:
+                st.caption("No saved chats yet. Start asking questions in the center to create one!")
+            else:
+                for ch in project_chats:
+                    cid = ch.get("chat_id")
+                    ctitle = ch.get("title", "Untitled Chat")
+                    is_active = (cid == st.session_state.active_chat_id)
+                    btn_type = "primary" if is_active else "secondary"
+                    
+                    col_cbtn, col_cmenu = st.columns([7.8, 2.2])
+                    with col_cbtn:
+                        if st.button(f"💬 {ctitle}", key=f"chat_{cid}", type=btn_type, use_container_width=True):
+                            st.session_state.active_chat_id = cid
+                            st.session_state.current_chat_title = ctitle
+                            st.session_state.messages = ch.get("messages", [])
+                            st.session_state.inspecting_document = None
                             st.rerun()
+                    with col_cmenu:
+                        with st.popover("⋮"):
+                            st.markdown("**Conversation**")
+                            new_title_val = st.text_input("Rename", value=ctitle, key=f"ren_txt_{cid}")
+                            if st.button("Save Name", key=f"btn_save_ren_{cid}", use_container_width=True):
+                                if new_title_val.strip():
+                                    rename_chat(project_id, cid, new_title_val.strip())
+                                    if cid == st.session_state.active_chat_id:
+                                        st.session_state.current_chat_title = new_title_val.strip()
+                                    st.rerun()
+                            if st.button("🗑️ Delete", key=f"btn_del_chat_{cid}", type="primary", use_container_width=True):
+                                delete_chat(project_id, cid)
+                                if cid == st.session_state.active_chat_id:
+                                    st.session_state.active_chat_id = str(uuid.uuid4())
+                                    st.session_state.current_chat_title = "New Chat"
+                                    st.session_state.messages = []
+                                st.rerun()
 
     # ==========================================
     # MIDDLE PANEL: ACTIVE CHAT (Red Box in drawing)
@@ -618,7 +649,7 @@ def render_retrio_home(project_id: str):
                 st.rerun()
 
         # Fixed height scrollable chat container sized to fit the screen without outer page scrolling
-        chat_container = st.container(height=495)
+        chat_container = st.container(height=450)
         with chat_container:
             if not st.session_state.messages:
                 st.markdown("""
@@ -634,6 +665,10 @@ def render_retrio_home(project_id: str):
                         st.markdown(msg["content"])
                         if msg.get("sources"):
                             with st.expander("📚 Retrieved Sources & Citations (BM25 + Dense RRF)"):
+                                if msg.get("search_query"):
+                                    st.caption(f"🔍 Reformulated Query: `{msg.get('search_query')}`")
+                                if msg.get("target_document"):
+                                    st.caption(f"🎯 Document Routing: `{msg.get('target_document')}`")
                                 for i, src in enumerate(msg["sources"]):
                                     st.markdown(f"**[{i+1}] {src.get('filename')} (Page {src.get('page_number')}) - `{src.get('type', 'text').upper()}`**")
                                     st.caption(f"Score: `{round(src.get('score', 0.0), 3)}` | Method: `{src.get('retrieval_method', 'hybrid')}`")
@@ -663,6 +698,10 @@ def render_retrio_home(project_id: str):
                         st.markdown(answer_text)
                         if sources:
                             with st.expander("📚 Retrieved Sources & Citations (BM25 + Dense RRF)"):
+                                if response.get("search_query"):
+                                    st.caption(f"🔍 Reformulated Query: `{response.get('search_query')}`")
+                                if response.get("target_document"):
+                                    st.caption(f"🎯 Document Routing: `{response.get('target_document')}`")
                                 for i, src in enumerate(sources):
                                     st.markdown(f"**[{i+1}] {src.get('filename')} (Page {src.get('page_number')}) - `{src.get('type', 'text').upper()}`**")
                                     st.caption(f"Score: `{round(src.get('score', 0.0), 3)}` | Method: `{src.get('retrieval_method', 'hybrid')}`")
@@ -672,6 +711,8 @@ def render_retrio_home(project_id: str):
                 "role": "assistant",
                 "content": answer_text,
                 "sources": sources,
+                "search_query": response.get("search_query"),
+                "target_document": response.get("target_document"),
             })
 
             save_chat(
@@ -720,73 +761,78 @@ def render_retrio_home(project_id: str):
 
         st.markdown("---")
 
-        # Section: Paused / Interrupted Ingestions
-        interrupted_docs = get_interrupted_documents(project_id)
-        if interrupted_docs:
-            st.markdown("##### ⚠️ Paused Ingestions")
-            for item in interrupted_docs:
-                fname = item["filename"]
-                lstage = item["last_stage"].capitalize()
-                fpath = get_project_docs_dir(project_id) / fname
+        # Knowledge Base Sources Header
+        st.markdown("<div style='font-size:11px; color:#8b949e; text-transform:uppercase; font-weight:700; margin-bottom:8px;'>Knowledge Base Sources</div>", unsafe_allow_html=True)
 
-                st.warning(f"**`{fname}`** paused after: **{lstage}**")
-                col_res, col_disc = st.columns([1, 1])
-                with col_res:
-                    if st.button(f"▶ Resume", key=f"res_{fname}", type="primary", use_container_width=True):
-                        progress_bar = st.progress(0, text="Resuming ingestion from checkpoint...")
-                        def on_resume_progress(stage_name, step, total):
-                            pct = int((step / total) * 100)
-                            progress_bar.progress(pct, text=f"Executing {stage_name} ({step}/{total})...")
+        # Scrollable container for Paused Ingestions and Knowledge Base Sources
+        sources_container = st.container(height=310)
+        with sources_container:
+            # Section: Paused / Interrupted Ingestions
+            interrupted_docs = get_interrupted_documents(project_id)
+            if interrupted_docs:
+                st.markdown("##### ⚠️ Paused Ingestions")
+                for item in interrupted_docs:
+                    fname = item["filename"]
+                    lstage = item["last_stage"].capitalize()
+                    fpath = get_project_docs_dir(project_id) / fname
 
-                        with st.spinner(f"Resuming `{fname}`..."):
-                            run_ingestion_pipeline(project_id, fpath, progress_callback=on_resume_progress)
-                            st.success(f"`{fname}` completed and indexed into ChromaDB!")
+                    st.warning(f"**`{fname}`** paused after: **{lstage}**")
+                    col_res, col_disc = st.columns([1, 1])
+                    with col_res:
+                        if st.button(f"▶ Resume", key=f"res_{fname}", type="primary", use_container_width=True):
+                            progress_bar = st.progress(0, text="Resuming ingestion from checkpoint...")
+                            def on_resume_progress(stage_name, step, total):
+                                pct = int((step / total) * 100)
+                                progress_bar.progress(pct, text=f"Executing {stage_name} ({step}/{total})...")
+
+                            with st.spinner(f"Resuming `{fname}`..."):
+                                run_ingestion_pipeline(project_id, fpath, progress_callback=on_resume_progress)
+                                st.success(f"`{fname}` completed and indexed into ChromaDB!")
+                                st.rerun()
+                    with col_disc:
+                        if st.button(f"🗑️ Discard", key=f"disc_{fname}", use_container_width=True):
+                            delete_source_document(project_id, fname)
+                            st.info(f"Discarded `{fname}`")
                             st.rerun()
-                with col_disc:
-                    if st.button(f"🗑️ Discard", key=f"disc_{fname}", use_container_width=True):
-                        delete_source_document(project_id, fname)
-                        st.info(f"Discarded `{fname}`")
-                        st.rerun()
 
-            st.markdown("---")
+                st.markdown("---")
 
-        # Section: Sources List (Click source to open pipeline directly + 3-dots delete menu)
-        st.markdown("##### Sources")
-        docs_dir = get_project_docs_dir(project_id)
-        interrupted_filenames = {item["filename"] for item in interrupted_docs}
-        source_files = [
-            f for f in docs_dir.iterdir()
-            if f.is_file()
-            and not f.name.endswith(".pipeline.json")
-            and not f.name.endswith(".checkpoint.json")
-            and f.name not in interrupted_filenames
-        ]
+            # Section: Sources List (Click source to open pipeline directly + 3-dots delete menu)
+            docs_dir = get_project_docs_dir(project_id)
+            interrupted_filenames = {item["filename"] for item in interrupted_docs}
+            source_files = [
+                f for f in docs_dir.iterdir()
+                if f.is_file()
+                and not f.name.endswith(".pipeline.json")
+                and not f.name.endswith(".checkpoint.json")
+                and f.name not in interrupted_filenames
+            ]
 
-        if not source_files:
-            st.info("No sources added yet. Drop a file above to index it!")
-        else:
-            for sfile in source_files:
-                size_mb = round(sfile.stat().st_size / (1024 * 1024), 2)
-                size_str = f"{size_mb} MB" if size_mb >= 0.01 else f"{round(sfile.stat().st_size / 1024, 1)} KB"
+            if not source_files:
+                st.info("No sources added yet. Drop a file above to index it!")
+            else:
+                for sfile in source_files:
+                    size_mb = round(sfile.stat().st_size / (1024 * 1024), 2)
+                    size_str = f"{size_mb} MB" if size_mb >= 0.01 else f"{round(sfile.stat().st_size / 1024, 1)} KB"
 
-                col_sbtn, col_smenu = st.columns([8.2, 1.8])
-                with col_sbtn:
-                    # Clicking the document card directly opens the Pipeline Page
-                    doc_label = f"📄 {sfile.name}  ({size_str})"
-                    if st.button(doc_label, key=f"src_card_{sfile.name}", use_container_width=True, help="Click to view processing pipeline"):
-                        st.session_state.inspecting_document = sfile.name
-                        st.rerun()
-                with col_smenu:
-                    with st.popover("⋮"):
-                        st.markdown("**Source Options**")
-                        st.caption(f"`{sfile.name}`")
-                        if st.button("⚡ Inspect Pipeline", key=f"pop_pipe_{sfile.name}", use_container_width=True):
+                    col_sbtn, col_smenu = st.columns([8.2, 1.8])
+                    with col_sbtn:
+                        # Clicking the document card directly opens the Pipeline Page
+                        doc_label = f"📄 {sfile.name}  ({size_str})"
+                        if st.button(doc_label, key=f"src_card_{sfile.name}", use_container_width=True, help="Click to view processing pipeline"):
                             st.session_state.inspecting_document = sfile.name
                             st.rerun()
-                        if st.button("🗑️ Delete Source", key=f"del_src_{sfile.name}", type="primary", use_container_width=True):
-                            delete_source_document(project_id, sfile.name)
-                            st.success(f"Deleted `{sfile.name}`")
-                            st.rerun()
+                    with col_smenu:
+                        with st.popover("⋮"):
+                            st.markdown("**Source Options**")
+                            st.caption(f"`{sfile.name}`")
+                            if st.button("⚡ Inspect Pipeline", key=f"pop_pipe_{sfile.name}", use_container_width=True):
+                                st.session_state.inspecting_document = sfile.name
+                                st.rerun()
+                            if st.button("🗑️ Delete Source", key=f"del_src_{sfile.name}", type="primary", use_container_width=True):
+                                delete_source_document(project_id, sfile.name)
+                                st.success(f"Deleted `{sfile.name}`")
+                                st.rerun()
 
 
 # ====================================================================

@@ -1,11 +1,108 @@
 import hashlib
 import time
+import re
 from typing import List, Dict, Any, Tuple
 from core.config import (
     MAX_CHUNK_CHARACTERS,
     COMBINE_UNDER_N_CHARS,
+    CHUNK_OVERLAP_CHARACTERS,
 )
 from core.logger import chunking_logger
+
+
+def extract_sentence_overlap(text_parts: List[str], max_overlap_chars: int = CHUNK_OVERLAP_CHARACTERS) -> List[str]:
+    """Extracts trailing sentence(s) to seed the next chunk, preventing boundary severing."""
+    if not text_parts:
+        return []
+    last_text = text_parts[-1].strip()
+    if len(last_text) <= max_overlap_chars:
+        return [last_text]
+    sentences = re.split(r"(?<=[.!?])\s+", last_text)
+    if len(sentences) >= 2:
+        candidate = " ".join(sentences[-2:])
+        if len(candidate) <= max_overlap_chars + 120:
+            return [candidate]
+        return [sentences[-1]]
+    return [last_text[-max_overlap_chars:]]
+
+
+def split_large_text_by_sentences(
+    text: str,
+    max_chars: int = MAX_CHUNK_CHARACTERS,
+    overlap_chars: int = CHUNK_OVERLAP_CHARACTERS,
+) -> List[str]:
+    """
+    Subdivides an oversized atomic text block (e.g. unstructured documents without headings
+    or large multi-thousand-character paragraphs) into coherent, sentence-bounded chunks
+    with trailing sentence overlap.
+    """
+    clean_text = text.strip()
+    if len(clean_text) <= max_chars:
+        return [clean_text]
+
+    # Split into individual sentences preserving punctuation
+    raw_sentences = re.split(r"(?<=[.!?])\s+", clean_text)
+    sentences = [s.strip() for s in raw_sentences if s.strip()]
+
+    # If no sentence boundaries were detected (e.g. continuous text without punctuation)
+    if len(sentences) <= 1:
+        words = clean_text.split()
+        chunks = []
+        cur_words = []
+        cur_len = 0
+        for w in words:
+            if cur_len + len(w) + 1 > max_chars and cur_words:
+                chunks.append(" ".join(cur_words))
+                overlap_words = []
+                overlap_len = 0
+                for ow in reversed(cur_words):
+                    if overlap_len + len(ow) + 1 <= overlap_chars:
+                        overlap_words.insert(0, ow)
+                        overlap_len += len(ow) + 1
+                    else:
+                        break
+                cur_words = list(overlap_words)
+                cur_len = sum(len(x) + 1 for x in cur_words)
+            cur_words.append(w)
+            cur_len += len(w) + 1
+        if cur_words:
+            chunks.append(" ".join(cur_words))
+        return chunks
+
+    chunks = []
+    current_sentences = []
+    current_len = 0
+
+    for sent in sentences:
+        sent_len = len(sent)
+        if current_len + sent_len + 1 > max_chars and current_sentences:
+            chunk_str = " ".join(current_sentences)
+            chunks.append(chunk_str)
+
+            # Trailing sentence overlap for the next sub-chunk
+            overlap_sentences = []
+            overlap_acc = 0
+            for s in reversed(current_sentences):
+                if overlap_acc + len(s) + 1 <= overlap_chars + 100:
+                    overlap_sentences.insert(0, s)
+                    overlap_acc += len(s) + 1
+                else:
+                    break
+
+            if not overlap_sentences and current_sentences:
+                overlap_sentences = [current_sentences[-1]]
+                overlap_acc = len(overlap_sentences[0])
+
+            current_sentences = list(overlap_sentences)
+            current_len = sum(len(s) + 1 for s in current_sentences)
+
+        current_sentences.append(sent)
+        current_len += sent_len + 1
+
+    if current_sentences:
+        chunks.append(" ".join(current_sentences))
+
+    return chunks
 
 
 def create_chunk_object(
@@ -33,6 +130,8 @@ def create_chunk_object(
     identity = f"{scope}:{chunk_type}:{content_digest}:{occurrence}"
     chunk_id = "chunk_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
+    section_name = (extra_metadata or {}).get("section", "General")
+
     chunk = {
         "chunk_id": chunk_id,
         "content_hash": content_digest,
@@ -43,6 +142,7 @@ def create_chunk_object(
         "page_range": f"{pages[0]}-{pages[-1]}" if len(pages) > 1 else str(pages[0]),
         "elements_merged": merged_elements_count,
         "filename": filename,
+        "section": section_name,
         "summary": None,  # Will be populated in Phase 2 Part 3 (Summarisation)
         "metadata": extra_metadata or {},
     }
@@ -89,8 +189,9 @@ def chunk_elements(
     current_text_parts: List[str] = []
     current_pages: List[int] = []
     current_merged_count = 0
+    current_section = "General"
 
-    def flush_text_chunk():
+    def flush_text_chunk(keep_overlap: bool = False):
         nonlocal current_text_parts, current_pages, current_merged_count
         if current_text_parts:
             combined_content = "\n\n".join(current_text_parts).strip()
@@ -101,13 +202,21 @@ def chunk_elements(
                     filename=current_filename,
                     page_numbers=current_pages,
                     merged_elements_count=current_merged_count,
+                    extra_metadata={"section": current_section} if current_section else {},
                     seen_hashes=seen_hashes,
                     source_key=source_key,
                 )
                 chunks.append(chunk)
-            current_text_parts = []
-            current_pages = []
-            current_merged_count = 0
+
+            if keep_overlap and current_text_parts:
+                overlap_seed = extract_sentence_overlap(current_text_parts)
+                current_text_parts = list(overlap_seed)
+                current_pages = [current_pages[-1]] if current_pages else [1]
+                current_merged_count = len(overlap_seed)
+            else:
+                current_text_parts = []
+                current_pages = []
+                current_merged_count = 0
 
     for el in elements:
         el_type = el.get("type", "text")
@@ -117,7 +226,7 @@ def chunk_elements(
 
         # Case 1: Table - keep intact as dedicated chunk
         if el_type == "table":
-            flush_text_chunk()
+            flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
             table_html = el.get("metadata", {}).get("text_as_html")
             table_chunk = create_chunk_object(
@@ -126,7 +235,7 @@ def chunk_elements(
                 filename=el_filename,
                 page_numbers=[el_page],
                 merged_elements_count=1,
-                extra_metadata={"text_as_html": table_html},
+                extra_metadata={"text_as_html": table_html, "section": current_section},
                 seen_hashes=seen_hashes,
                 source_key=source_key,
             )
@@ -135,7 +244,7 @@ def chunk_elements(
 
         # Case 2: Image - keep intact as dedicated chunk
         if el_type == "image":
-            flush_text_chunk()
+            flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
             image_chunk = create_chunk_object(
                 content=el_text or "[Image element detected]",
@@ -143,18 +252,32 @@ def chunk_elements(
                 filename=el_filename,
                 page_numbers=[el_page],
                 merged_elements_count=1,
+                extra_metadata={"section": current_section},
                 seen_hashes=seen_hashes,
                 source_key=source_key,
             )
             chunks.append(image_chunk)
             continue
 
-        # Case 3: Title - natural section boundary
-        if el_type == "title":
+        # Case 3: Title - natural section boundary (titles must be reasonably concise)
+        if el_type == "title" and len(el_text) <= 300:
+            clean_title = " ".join(el_text.split())
+            base_fname = re.sub(r"\.[^.]+$", "", el_filename).lower() if el_filename else ""
+            is_running_header = (
+                bool(re.search(r"\b(all rights reserved|copyright|page\s+\d+(\s+of\s+\d+)?)\b", clean_title, re.I))
+                or (len(base_fname) >= 4 and base_fname in clean_title.lower())
+            )
+            is_section_header = bool(re.match(
+                r"^(\d+(\.\d+)*\s+[A-Z]|Appendix|References|Table\s+[A-Z0-9]+|Figure\s+[A-Z0-9]+|[A-Z][a-zA-Z\s]{3,40}$)",
+                clean_title
+            ))
+            if is_section_header and not is_running_header and len(clean_title) < 100:
+                current_section = clean_title
+
             current_buffer_len = sum(len(p) for p in current_text_parts)
             # Only start a new chunk on a title if current buffer already has meaningful content
             if current_buffer_len >= COMBINE_UNDER_N_CHARS:
-                flush_text_chunk()
+                flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
             current_text_parts.append(el_text)
             current_pages.append(el_page)
@@ -164,18 +287,48 @@ def chunk_elements(
         # Case 4: Text or Other elements
         if el_text:
             if current_text_parts and el_filename != current_filename:
-                flush_text_chunk()
+                flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
+
+            # Handle unstructured / oversized text where a single atomic element exceeds max_chars
+            if len(el_text) > max_chars:
+                current_buffer_len = sum(len(p) for p in current_text_parts)
+                if current_buffer_len > 0:
+                    if current_buffer_len < COMBINE_UNDER_N_CHARS:
+                        # Prepend small preceding text (e.g. section title or stub) to this text block
+                        el_text = "\n\n".join(current_text_parts) + "\n\n" + el_text
+                        current_text_parts = []
+                        current_pages = []
+                        current_merged_count = 0
+                    else:
+                        flush_text_chunk(keep_overlap=False)
+
+                sub_parts = split_large_text_by_sentences(
+                    el_text, max_chars=max_chars, overlap_chars=CHUNK_OVERLAP_CHARACTERS
+                )
+
+                for sp in sub_parts[:-1]:
+                    current_text_parts = [sp]
+                    current_pages = [el_page]
+                    current_merged_count = 1
+                    flush_text_chunk(keep_overlap=False)
+
+                if sub_parts:
+                    current_text_parts = [sub_parts[-1]]
+                    current_pages = [el_page]
+                    current_merged_count = 1
+                continue
+
             projected_len = sum(len(p) for p in current_text_parts) + len(el_text) + 2
             if projected_len > max_chars and current_text_parts:
-                flush_text_chunk()
+                flush_text_chunk(keep_overlap=True)
 
             current_text_parts.append(el_text)
             current_pages.append(el_page)
             current_merged_count += 1
 
     # Flush any remaining text elements
-    flush_text_chunk()
+    flush_text_chunk(keep_overlap=False)
 
     # Calculate statistics for the Chunking UI tab
     total_atomic = len(elements)

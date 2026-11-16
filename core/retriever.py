@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from typing import List, Dict, Any, Optional
 from rank_bm25 import BM25Okapi
@@ -10,6 +11,38 @@ from core.config import (
 )
 from core.vectorstore import get_project_vectorstore, get_all_chunks
 from core.logger import retrieval_logger
+
+BM25_STOPWORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
+    "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but",
+    "by", "could", "did", "do", "does", "doing", "down", "during", "each", "few", "for", "from",
+    "further", "had", "has", "have", "having", "he", "her", "here", "hers", "herself", "him",
+    "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "me", "more",
+    "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other",
+    "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should", "so",
+    "some", "such", "than", "that", "the", "their", "theirs", "them", "themselves", "then",
+    "there", "these", "they", "this", "those", "through", "to", "too", "under", "until", "up",
+    "very", "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom",
+    "why", "with", "would", "you", "your", "yours", "yourself", "yourselves"
+}
+
+
+def tokenize_for_bm25(text: str, filter_stopwords: bool = True) -> List[str]:
+    """Extracts lowercase alphanumeric tokens, stripping punctuation and optionally filtering stopwords."""
+    if not text:
+        return []
+    raw_tokens = re.findall(r"\b[a-zA-Z0-9_\-\.]{2,}\b", text.lower())
+    cleaned = []
+    for t in raw_tokens:
+        clean_tok = t.strip("-._")
+        if len(clean_tok) < 2:
+            continue
+        if filter_stopwords and clean_tok in BM25_STOPWORDS:
+            continue
+        cleaned.append(clean_tok)
+    if not cleaned and raw_tokens:
+        return [t.strip("-._") for t in raw_tokens if len(t.strip("-._")) >= 2]
+    return cleaned
 
 
 class HybridRetriever:
@@ -24,51 +57,60 @@ class HybridRetriever:
         self.vectorstore = get_project_vectorstore(project_id)
         self.chunks: List[Dict[str, Any]] = get_all_chunks(project_id)
         
-        # Initialize BM25 corpus index
+        # Initialize BM25 corpus index with cleaned, punctuation-free tokens
         self.bm25: Optional[BM25Okapi] = None
         if self.chunks:
             tokenized_corpus = [
-                (c.get("indexed_text") or c.get("content", "")).lower().split()
+                tokenize_for_bm25(c.get("indexed_text") or c.get("content", ""), filter_stopwords=False)
                 for c in self.chunks
             ]
             self.bm25 = BM25Okapi(tokenized_corpus)
 
-    def _dense_search(self, query: str, k: int) -> List[Dict[str, Any]]:
+    def _dense_search(self, query: str, k: int, filename_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """Performs semantic similarity search via ChromaDB."""
         if not self.chunks:
             retrieval_logger.warning(f"Dense search skipped for Project '{self.project_id}': no chunks indexed.")
             return []
         t0 = time.perf_counter()
         try:
-            results = self.vectorstore.similarity_search_with_score(query, k=k)
+            search_kwargs: Dict[str, Any] = {"k": k}
+            if filename_filter:
+                search_kwargs["filter"] = {"filename": filename_filter}
+            results = self.vectorstore.similarity_search_with_score(query, **search_kwargs)
             dense_docs = []
             for doc, score in results:
                 meta = doc.metadata or {}
+                content = meta.get("raw_content") or doc.page_content
+                summary = meta.get("summary") or None
+                # Skip bare placeholder chunks that contain no real visual summary or caption
+                if content.strip().startswith(("[Embedded Figure:", "[Embedded Visual")) and not summary:
+                    continue
                 dense_docs.append({
                     "chunk_id": meta.get("chunk_id"),
-                    "content": meta.get("raw_content") or doc.page_content,
+                    "content": content,
                     "filename": meta.get("filename", "unknown"),
                     "page_number": meta.get("page_number", 1),
                     "type": meta.get("type", "text"),
-                    "summary": meta.get("summary") or None,
+                    "section": meta.get("section") or "General",
+                    "summary": summary,
                     "score": float(score) if score is not None else 0.0,
                 })
             elapsed_ms = (time.perf_counter() - t0) * 1000
             top_score = f"{dense_docs[0]['score']:.4f}" if dense_docs else "None"
-            retrieval_logger.info(f"Dense search: retrieved {len(dense_docs)} chunks in {elapsed_ms:.1f}ms | Top distance/score: {top_score}")
+            retrieval_logger.info(f"Dense search: retrieved {len(dense_docs)} chunks in {elapsed_ms:.1f}ms | Filter: {filename_filter or 'none'} | Top distance/score: {top_score}")
             return dense_docs
         except Exception as e:
             retrieval_logger.error(f"Dense search failed: {e}", exc_info=True)
             return []
 
-    def _sparse_search(self, query: str, k: int) -> List[Dict[str, Any]]:
-        """Performs lexical BM25 keyword search across all indexed chunks."""
+    def _sparse_search(self, query: str, k: int, filename_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Performs lexical BM25 keyword search across indexed chunks."""
         if not self.bm25 or not self.chunks:
             retrieval_logger.warning(f"BM25 search skipped for Project '{self.project_id}': index is empty.")
             return []
         
         t0 = time.perf_counter()
-        query_tokens = query.lower().split()
+        query_tokens = tokenize_for_bm25(query, filter_stopwords=True)
         if not query_tokens:
             return []
             
@@ -76,21 +118,33 @@ class HybridRetriever:
         scored_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         
         sparse_docs = []
-        for idx in scored_indices[:k]:
-            if scores[idx] > 0:  # Only return documents that had at least one keyword match
-                c = self.chunks[idx]
-                sparse_docs.append({
-                    "chunk_id": c.get("chunk_id"),
-                    "content": c.get("content", ""),
-                    "filename": c.get("filename", "unknown"),
-                    "page_number": c.get("page_number", 1),
-                    "type": c.get("type", "text"),
-                    "summary": c.get("summary"),
-                    "score": float(scores[idx]),
-                })
+        for idx in scored_indices:
+            if scores[idx] <= 0:
+                break
+            c = self.chunks[idx]
+            if filename_filter and c.get("filename") != filename_filter:
+                continue
+            content = c.get("content", "")
+            summary = c.get("summary")
+            # Skip bare placeholder chunks that contain no real visual summary or caption
+            if content.strip().startswith(("[Embedded Figure:", "[Embedded Visual")) and not summary:
+                continue
+            sparse_docs.append({
+                "chunk_id": c.get("chunk_id"),
+                "content": content,
+                "filename": c.get("filename", "unknown"),
+                "page_number": c.get("page_number", 1),
+                "type": c.get("type", "text"),
+                "section": c.get("section") or c.get("metadata", {}).get("section") or "General",
+                "summary": summary,
+                "score": float(scores[idx]),
+            })
+            if len(sparse_docs) >= k:
+                break
+
         elapsed_ms = (time.perf_counter() - t0) * 1000
         top_score = f"{sparse_docs[0]['score']:.4f}" if sparse_docs else "0.0"
-        retrieval_logger.info(f"BM25 search: retrieved {len(sparse_docs)} chunks in {elapsed_ms:.1f}ms | Tokens: {query_tokens[:5]} | Top score: {top_score}")
+        retrieval_logger.info(f"BM25 search: retrieved {len(sparse_docs)} chunks in {elapsed_ms:.1f}ms | Tokens: {query_tokens[:5]} | Filter: {filename_filter or 'none'} | Top score: {top_score}")
         return sparse_docs
 
     def _reciprocal_rank_fusion(
@@ -184,6 +238,7 @@ class HybridRetriever:
         query: str,
         top_k: int = HYBRID_SEARCH_TOP_K,
         top_n: int = RERANK_TOP_N,
+        filename_filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         End-to-end Hybrid Retrieval:
@@ -193,10 +248,11 @@ class HybridRetriever:
         4. Neural Reranking (Cohere or RRF fallback)
         """
         t0 = time.perf_counter()
-        retrieval_logger.info(f"Retrieval initiated for Project: {self.project_id} | Query: '{query[:80]}...'")
+        filter_msg = f" | Filter: '{filename_filter}'" if filename_filter else ""
+        retrieval_logger.info(f"Retrieval initiated for Project: {self.project_id}{filter_msg} | Query: '{query[:80]}...'")
 
-        dense_docs = self._dense_search(query, k=top_k)
-        sparse_docs = self._sparse_search(query, k=top_k)
+        dense_docs = self._dense_search(query, k=top_k, filename_filter=filename_filter)
+        sparse_docs = self._sparse_search(query, k=top_k, filename_filter=filename_filter)
 
         # Merge with Reciprocal Rank Fusion
         fused_candidates = self._reciprocal_rank_fusion(dense_docs, sparse_docs)

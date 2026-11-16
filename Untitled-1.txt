@@ -1,0 +1,1 @@
+.gitignore api/main.py api/routers/projects.py app.py core/chunker.py core/config.py core/parser.py core/pipeline.py core/projects.py core/rag_chain.py core/retriever.py core/vectorstore.py

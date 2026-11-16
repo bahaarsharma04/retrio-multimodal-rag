@@ -107,6 +107,7 @@ def load_document_pipeline_data(project_id: str, filename: str) -> Optional[Dict
 
 
 def sha256_file(path: Path) -> str:
+    """Computes a streaming SHA-256 hex digest for a file."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -115,6 +116,7 @@ def sha256_file(path: Path) -> str:
 
 
 def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
+    """Safely writes JSON to a temp file and replaces the target atomically."""
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2, ensure_ascii=False)
