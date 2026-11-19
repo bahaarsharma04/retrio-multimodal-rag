@@ -55,6 +55,34 @@ class ConversationSummary(BaseModel):
     message_count: int
 
 
+# ----------------- User & Auth Schemas -----------------
+
+class UserRegisterRequest(BaseModel):
+    email: str = Field(..., description="User's email address")
+    password: str = Field(..., min_length=6, max_length=128, description="User password (min 6 chars)")
+    full_name: Optional[str] = Field("", max_length=100, description="User's display or full name")
+
+
+class UserLoginRequest(BaseModel):
+    email: str = Field(..., description="User's email address")
+    password: str = Field(..., description="User password")
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    full_name: Optional[str] = ""
+    role: str = "user"
+    is_active: bool = True
+    created_at: str = ""
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
 # ----------------- Project Schemas -----------------
 
 class ProjectCreateRequest(BaseModel):
@@ -64,6 +92,8 @@ class ProjectCreateRequest(BaseModel):
 
 class ProjectResponse(BaseModel):
     id: str
+    owner_id: Optional[str] = None
+    owner_email: Optional[str] = None
     name: str
     description: str
     created_at: str

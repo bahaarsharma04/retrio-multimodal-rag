@@ -1,6 +1,7 @@
 import hashlib
 import time
 import re
+from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from core.config import (
     MAX_CHUNK_CHARACTERS,
@@ -131,20 +132,38 @@ def create_chunk_object(
     chunk_id = "chunk_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     section_name = (extra_metadata or {}).get("section", "General")
+    title_name = (extra_metadata or {}).get("title") or section_name or Path(filename).stem.replace("_", " ").title()
+    part_index = (extra_metadata or {}).get("part_index", 1)
+    total_parts = (extra_metadata or {}).get("total_parts", 1)
+    image_path = (extra_metadata or {}).get("image_path")
+    caption = (extra_metadata or {}).get("caption")
 
     chunk = {
         "chunk_id": chunk_id,
         "content_hash": content_digest,
         "type": chunk_type,  # 'text', 'table', or 'image'
+        "title": title_name,
+        "section": section_name,
+        "part_index": part_index,
+        "total_parts": total_parts,
+        "image_path": image_path,
+        "caption": caption,
         "content": clean_text,
         "char_count": len(clean_text),
         "page_number": pages[0] if pages else 1,
         "page_range": f"{pages[0]}-{pages[-1]}" if len(pages) > 1 else str(pages[0]),
         "elements_merged": merged_elements_count,
         "filename": filename,
-        "section": section_name,
         "summary": None,  # Will be populated in Phase 2 Part 3 (Summarisation)
-        "metadata": extra_metadata or {},
+        "metadata": {
+            **(extra_metadata or {}),
+            "title": title_name,
+            "section": section_name,
+            "part_index": part_index,
+            "total_parts": total_parts,
+            "image_path": image_path,
+            "caption": caption,
+        },
     }
     return chunk
 
@@ -189,10 +208,16 @@ def chunk_elements(
     current_text_parts: List[str] = []
     current_pages: List[int] = []
     current_merged_count = 0
-    current_section = "General"
+    base_title = re.sub(r"\.[^.]+$", "", Path(current_filename).name).replace("_", " ").replace("-", " ").strip().title()
+    current_section = base_title
+    current_title = base_title
+    current_part_index = 1
+    current_total_parts = 1
 
-    def flush_text_chunk(keep_overlap: bool = False):
-        nonlocal current_text_parts, current_pages, current_merged_count
+    def flush_text_chunk(keep_overlap: bool = False, part_index: int = None, total_parts: int = None):
+        nonlocal current_text_parts, current_pages, current_merged_count, current_part_index, current_total_parts
+        p_idx = part_index if part_index is not None else current_part_index
+        t_parts = total_parts if total_parts is not None else current_total_parts
         if current_text_parts:
             combined_content = "\n\n".join(current_text_parts).strip()
             if combined_content:
@@ -202,7 +227,12 @@ def chunk_elements(
                     filename=current_filename,
                     page_numbers=current_pages,
                     merged_elements_count=current_merged_count,
-                    extra_metadata={"section": current_section} if current_section else {},
+                    extra_metadata={
+                        "section": current_section,
+                        "title": current_title,
+                        "part_index": p_idx,
+                        "total_parts": t_parts,
+                    },
                     seen_hashes=seen_hashes,
                     source_key=source_key,
                 )
@@ -217,6 +247,8 @@ def chunk_elements(
                 current_text_parts = []
                 current_pages = []
                 current_merged_count = 0
+                current_part_index = 1
+                current_total_parts = 1
 
     for el in elements:
         el_type = el.get("type", "text")
@@ -235,7 +267,13 @@ def chunk_elements(
                 filename=el_filename,
                 page_numbers=[el_page],
                 merged_elements_count=1,
-                extra_metadata={"text_as_html": table_html, "section": current_section},
+                extra_metadata={
+                    "text_as_html": table_html,
+                    "section": current_section,
+                    "title": current_title,
+                    "part_index": 1,
+                    "total_parts": 1,
+                },
                 seen_hashes=seen_hashes,
                 source_key=source_key,
             )
@@ -246,13 +284,22 @@ def chunk_elements(
         if el_type == "image":
             flush_text_chunk(keep_overlap=False)
             current_filename = el_filename
+            img_path = el.get("metadata", {}).get("image_path")
+            caption_val = el.get("metadata", {}).get("caption")
             image_chunk = create_chunk_object(
                 content=el_text or "[Image element detected]",
                 chunk_type="image",
                 filename=el_filename,
                 page_numbers=[el_page],
                 merged_elements_count=1,
-                extra_metadata={"section": current_section},
+                extra_metadata={
+                    "section": current_section,
+                    "title": current_title,
+                    "image_path": img_path,
+                    "caption": caption_val,
+                    "part_index": 1,
+                    "total_parts": 1,
+                },
                 seen_hashes=seen_hashes,
                 source_key=source_key,
             )
@@ -271,8 +318,9 @@ def chunk_elements(
                 r"^(\d+(\.\d+)*\s+[A-Z]|Appendix|References|Table\s+[A-Z0-9]+|Figure\s+[A-Z0-9]+|[A-Z][a-zA-Z\s]{3,40}$)",
                 clean_title
             ))
-            if is_section_header and not is_running_header and len(clean_title) < 100:
+            if not is_running_header and len(clean_title) < 120:
                 current_section = clean_title
+                current_title = clean_title
 
             current_buffer_len = sum(len(p) for p in current_text_parts)
             # Only start a new chunk on a title if current buffer already has meaningful content
@@ -282,6 +330,8 @@ def chunk_elements(
             current_text_parts.append(el_text)
             current_pages.append(el_page)
             current_merged_count += 1
+            current_part_index = 1
+            current_total_parts = 1
             continue
 
         # Case 4: Text or Other elements
@@ -306,17 +356,19 @@ def chunk_elements(
                 sub_parts = split_large_text_by_sentences(
                     el_text, max_chars=max_chars, overlap_chars=CHUNK_OVERLAP_CHARACTERS
                 )
-
-                for sp in sub_parts[:-1]:
+                total_p = len(sub_parts)
+                for idx, sp in enumerate(sub_parts[:-1], 1):
                     current_text_parts = [sp]
                     current_pages = [el_page]
                     current_merged_count = 1
-                    flush_text_chunk(keep_overlap=False)
+                    flush_text_chunk(keep_overlap=False, part_index=idx, total_parts=total_p)
 
                 if sub_parts:
                     current_text_parts = [sub_parts[-1]]
                     current_pages = [el_page]
                     current_merged_count = 1
+                    current_part_index = total_p
+                    current_total_parts = total_p
                 continue
 
             projected_len = sum(len(p) for p in current_text_parts) + len(el_text) + 2
@@ -326,6 +378,8 @@ def chunk_elements(
             current_text_parts.append(el_text)
             current_pages.append(el_page)
             current_merged_count += 1
+            current_part_index = 1
+            current_total_parts = 1
 
     # Flush any remaining text elements
     flush_text_chunk(keep_overlap=False)

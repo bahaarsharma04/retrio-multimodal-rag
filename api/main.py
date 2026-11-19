@@ -1,12 +1,15 @@
 import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
 
 from api.schemas import HealthResponse
-from api.routers import chat, projects, documents
+from api.routers import auth, chat, projects, documents
 from db.session import init_db, is_db_connected
 from core.logger import app_logger
+from core.limiter import limiter
 
 
 @asynccontextmanager
@@ -29,6 +32,20 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Register SlowAPI Limiter state & custom exception handler
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "rate_limit_exceeded",
+            "detail": f"Rate limit exceeded: {exc.detail}",
+        },
+        headers={"Retry-After": "60"},
+    )
+
 # Enable CORS for external frontends / Postman / web apps
 app.add_middleware(
     CORSMiddleware,
@@ -48,6 +65,7 @@ async def log_requests_middleware(request: Request, call_next):
     return response
 
 # Include API Routers
+app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(projects.router)
 app.include_router(documents.router)

@@ -27,45 +27,40 @@ from unstructured.partition.docx import partition_docx
 from unstructured.partition.text import partition_text
 
 
+# Standard font ligatures for TeX, Computer Modern, and Type 1 PDF font streams
+STANDARD_PDF_LIGATURES = {
+    "(cid:0)": " ",
+    "(cid:1)": "ff",
+    "(cid:2)": "fi",
+    "(cid:3)": "fl",
+    "(cid:4)": "ffi",
+    "(cid:5)": "ffl",
+    "(cid:6)": "–",
+    "(cid:7)": "—",
+    "(cid:8)": "“",
+    "(cid:9)": "”",
+    "(cid:10)": "‘",
+    "(cid:11)": "’",
+}
+
+
 def clean_text_artifacts(text: str) -> str:
     """
     Cleans raw PDF text extractions:
     - Removes null bytes (\x00) and unprintable control characters.
-    - Strips CID font glyph artifacts like (cid:0), (cid:14), etc.
+    - Decodes standard PDF/TeX ligatures (fi, fl, ff, ffi, ffl).
     - Normalizes bullet points from unmapped glyphs (\x99, ™, •).
-    - Rejoins hyphenated words broken across line wraps (e.g. 'au-\n rora' -> 'aurora').
-    - Rejoins hyphenated words broken with spaces (e.g. 'au- rora' -> 'aurora').
-    - Normalizes dropped drop-caps (e.g. missing initial 'T' in 'he beautiful').
-    - Strips standalone page numbers on isolated lines.
+    - Rejoins hyphenated words broken across line wraps (e.g. 'multi-\n modal' -> 'multimodal').
+    - Rejoins hyphenated words broken with spaces on the same line.
+    - Strips isolated single-line page numbers.
     - Collapses excessive horizontal whitespace and consecutive newlines.
     """
     if not text:
         return ""
     # Strip null bytes and non-whitespace control characters
     text = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", "", text)
-    # Decode known CID glyphs from diagram fonts (e.g. Figure 4 in Aurora.pdf)
-    cid_decode_map = {
-        "(cid:0)": " ",
-        "(cid:2)": "2",
-        "(cid:3)": "E",
-        "(cid:4)": "N",
-        "(cid:5)": " ",
-        "(cid:6)": "a",
-        "(cid:7)": "c",
-        "(cid:8)": "d",
-        "(cid:9)": "e",
-        "(cid:10)": "g",
-        "(cid:11)": "i",
-        "(cid:12)": "m",
-        "(cid:13)": "n",
-        "(cid:14)": "o",
-        "(cid:15)": "r",
-        "(cid:16)": "s",
-        "(cid:17)": "t",
-        "(cid:18)": "x",
-        "(cid:19)": "y",
-    }
-    for cid_code, plain_char in cid_decode_map.items():
+    # Decode standard PDF font ligatures
+    for cid_code, plain_char in STANDARD_PDF_LIGATURES.items():
         text = text.replace(cid_code, plain_char)
     # Strip any remaining unmapped CID font artifacts
     text = re.sub(r"\(cid:\d+\)", "", text)
@@ -75,11 +70,6 @@ def clean_text_artifacts(text: str) -> str:
     text = re.sub(r"(\b[a-zA-Z]+)-\s*\n\s*([a-zA-Z]+\b)", r"\1\2", text)
     # Fix broken hyphenation with spaces on same line: word- word -> wordword
     text = re.sub(r"(\b[a-zA-Z]{3,})-\s+([a-zA-Z]{2,}\b)", r"\1\2", text)
-    # Normalize known dropped drop-caps where vector initials are omitted by text streams
-    text = re.sub(r"\bhe beautiful and often eerie\b", "The beautiful and often eerie", text)
-    # Fix cross-page hyphenation artifacts
-    text = re.sub(r"\bcoin-\s*$", "coincide with larger auroral ovals.", text, flags=re.MULTILINE)
-    text = re.sub(r"(?m)^\s*\d+\s+cide with\b", "coincide with", text)
     # Strip isolated single-line page numbers (e.g. "2", "3")
     text = re.sub(r"(?m)^\s*\d+\s*$", "", text)
     # Collapse 2+ horizontal spaces/tabs into a single space (prevents whitespace bloat)
@@ -108,18 +98,12 @@ def extract_pdf_pages_layout(file_path: Path) -> List[Tuple[int, str]]:
         for page_idx, page in enumerate(pdf.pages):
             page_no = page_idx + 1
             table_bboxes = [t.bbox for t in page.find_tables()] if hasattr(page, "find_tables") else []
-            cid_decode_map = {
-                "(cid:0)": " ", "(cid:2)": "2", "(cid:3)": "E", "(cid:4)": "N", "(cid:5)": " ",
-                "(cid:6)": "a", "(cid:7)": "c", "(cid:8)": "d", "(cid:9)": "e", "(cid:10)": "g",
-                "(cid:11)": "i", "(cid:12)": "m", "(cid:13)": "n", "(cid:14)": "o", "(cid:15)": "r",
-                "(cid:16)": "s", "(cid:17)": "t", "(cid:18)": "x", "(cid:19)": "y"
-            }
-            raw_words = page.extract_words() or []
+            raw_words = page.extract_words(x_tolerance=1.5) or []
             words = []
             for w in raw_words:
                 w_text = w.get("text", "")
                 if "(cid:" in w_text:
-                    for k, v in cid_decode_map.items():
+                    for k, v in STANDARD_PDF_LIGATURES.items():
                         w_text = w_text.replace(k, v)
                     w_text = re.sub(r"\(cid:\d+\)", "", w_text).strip()
                 if not w_text:
@@ -134,7 +118,7 @@ def extract_pdf_pages_layout(file_path: Path) -> List[Tuple[int, str]]:
                 w_clean["text"] = w_text
                 words.append(w_clean)
             if not words or len(words) < 15:
-                raw = page.extract_text() or ""
+                raw = page.extract_text(x_tolerance=1.5) or ""
                 cleaned = clean_text_artifacts(raw)
                 if cleaned:
                     page_texts.append((page_no, cleaned))
@@ -154,7 +138,7 @@ def extract_pdf_pages_layout(file_path: Path) -> List[Tuple[int, str]]:
             )
 
             if not is_two_col:
-                raw = page.extract_text() or ""
+                raw = page.extract_text(x_tolerance=1.5) or ""
                 cleaned = clean_text_artifacts(raw)
                 if cleaned:
                     page_texts.append((page_no, cleaned))
@@ -337,46 +321,240 @@ def classify_element(element: Element) -> str:
         return "other"
 
 
-def parse_csv_file(file_path: Path) -> List[Dict[str, Any]]:
+def parse_csv_file(file_path: Path, max_rows_per_batch: int = 30) -> List[Dict[str, Any]]:
     """
-    Parses a CSV file into structured table elements using pandas,
-    generating both readable markdown and HTML representations.
+    Parses a CSV file into structured table elements using pandas.
+    Batches large tables into readable segments while preserving headers on every segment.
     """
     df = pd.read_csv(file_path)
-    table_markdown = df.to_markdown(index=False)
-    table_html = df.to_html(index=False, classes="table table-striped")
-    
-    element_dict = {
-        "type": "table",
-        "element_class": "Table",
-        "text": f"CSV Table from {file_path.name}:\n\n{table_markdown}",
+    clean_name = file_path.stem.replace("_", " ").replace("-", " ").strip().title()
+    elements = []
+
+    # 1. Top Title element for dataset identity
+    elements.append({
+        "type": "title",
+        "element_class": "Title",
+        "text": f"Dataset: {clean_name}",
         "metadata": {
             "page_number": 1,
             "filename": file_path.name,
-            "rows": len(df),
-            "columns": list(df.columns),
-            "text_as_html": table_html,
+            "text_as_html": None,
         }
-    }
-    return [element_dict]
+    })
+
+    # 2. Table element(s) with row batching
+    total_rows = len(df)
+    if total_rows <= max_rows_per_batch:
+        table_markdown = df.to_markdown(index=False)
+        table_html = df.to_html(index=False, classes="table table-striped")
+        elements.append({
+            "type": "table",
+            "element_class": "Table",
+            "text": f"Table: {file_path.name}\n\n{table_markdown}",
+            "metadata": {
+                "page_number": 1,
+                "filename": file_path.name,
+                "rows": total_rows,
+                "columns": list(df.columns),
+                "text_as_html": table_html,
+            }
+        })
+    else:
+        for start_idx in range(0, total_rows, max_rows_per_batch):
+            end_idx = min(start_idx + max_rows_per_batch, total_rows)
+            sub_df = df.iloc[start_idx:end_idx]
+            sub_md = sub_df.to_markdown(index=False)
+            sub_html = sub_df.to_html(index=False, classes="table table-striped")
+            elements.append({
+                "type": "table",
+                "element_class": "Table",
+                "text": f"Table: {file_path.name} (Rows {start_idx + 1} to {end_idx} of {total_rows}):\n\n{sub_md}",
+                "metadata": {
+                    "page_number": 1,
+                    "filename": file_path.name,
+                    "rows": len(sub_df),
+                    "columns": list(df.columns),
+                    "row_range": f"{start_idx + 1}-{end_idx}",
+                    "text_as_html": sub_html,
+                }
+            })
+
+    return elements
+
+
+def is_transcript_content(text: str) -> bool:
+    """Detects whether text content resembles an audio/video/meeting transcript."""
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    if len(lines) < 3:
+        return False
+    # Check for speaker labels like 'Speaker 1:', 'Alice:', 'John Doe:', or timestamped '[00:01:23] Name:'
+    pattern = re.compile(r"^(\[?\d{1,2}:\d{2}(?::\d{2})?\]?\s*)?([A-Z][a-zA-Z0-9_\s]{1,25}):\s+(.+)$")
+    matches = sum(1 for line in lines if pattern.match(line))
+    return (matches / len(lines)) >= 0.20 or matches >= 5
+
+
+def parse_transcript_content(text: str, filename: str) -> List[Dict[str, Any]]:
+    """Normalizes transcript dialogue into structured speaker elements."""
+    clean_name = Path(filename).stem.replace("_", " ").replace("-", " ").strip().title()
+    elements = [{
+        "type": "title",
+        "element_class": "Title",
+        "text": f"Transcript: {clean_name}",
+        "metadata": {"page_number": 1, "filename": filename, "text_as_html": None}
+    }]
+
+    pattern = re.compile(r"^(\[?\d{1,2}:\d{2}(?::\d{2})?\]?\s*)?([A-Z][a-zA-Z0-9_\s]{1,25}):\s+(.+)$")
+    current_speaker = "Speaker"
+    current_lines = []
+
+    for line in text.split("\n"):
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        m = pattern.match(line_clean)
+        if m:
+            if current_lines:
+                elements.append({
+                    "type": "text",
+                    "element_class": "NarrativeText",
+                    "text": f"[{current_speaker}]: {' '.join(current_lines)}",
+                    "metadata": {
+                        "page_number": 1,
+                        "filename": filename,
+                        "speaker": current_speaker,
+                        "section": f"Speaker: {current_speaker}",
+                    }
+                })
+                current_lines = []
+            current_speaker = m.group(2).strip()
+            speech = m.group(3).strip()
+            if speech:
+                current_lines.append(speech)
+        else:
+            current_lines.append(line_clean)
+
+    if current_lines:
+        elements.append({
+            "type": "text",
+            "element_class": "NarrativeText",
+            "text": f"[{current_speaker}]: {' '.join(current_lines)}",
+            "metadata": {
+                "page_number": 1,
+                "filename": filename,
+                "speaker": current_speaker,
+                "section": f"Speaker: {current_speaker}",
+            }
+        })
+
+    return elements
+
+
+def is_receipt_invoice_content(text: str) -> bool:
+    """Detects whether text content resembles a financial receipt or invoice."""
+    lower_t = text.lower()
+    keywords = [
+        "invoice", "receipt", "bill to", "tax invoice", "subtotal",
+        "amount due", "order summary", "payment receipt", "total amount", "balance due"
+    ]
+    matches = sum(1 for kw in keywords if kw in lower_t)
+    return matches >= 3
+
+
+def parse_receipt_invoice_content(text: str, filename: str) -> List[Dict[str, Any]]:
+    """Normalizes financial receipts/invoices into a structured summary header plus itemized elements."""
+    clean_name = Path(filename).stem.replace("_", " ").replace("-", " ").strip().title()
+    
+    vendor_match = re.search(r"^(?:vendor|company|merchant|from)?\s*:?\s*([A-Za-z0-9&.,\s]{3,40})", text, re.I | re.M)
+    inv_no_match = re.search(r"(?:invoice|receipt|bill)\s*(?:#|no|number|num)?:?\s*([A-Za-z0-9-]+)", text, re.I)
+    date_match = re.search(r"(?:date|issued)\s*:?\s*(\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|\w+\s+\d{1,2},?\s+\d{4})", text, re.I)
+    total_match = re.search(r"(?:total|amount due|balance due)\s*:?\s*([$€£₹]?\s*\d+(?:,\d{3})*(?:\.\d{2})?)", text, re.I)
+
+    vendor = vendor_match.group(1).strip() if vendor_match else clean_name
+    inv_no = inv_no_match.group(1).strip() if inv_no_match else "N/A"
+    date_val = date_match.group(1).strip() if date_match else "N/A"
+    total_val = total_match.group(1).strip() if total_match else "N/A"
+
+    elements = [
+        {
+            "type": "title",
+            "element_class": "Title",
+            "text": f"Receipt: {vendor} ({inv_no})",
+            "metadata": {"page_number": 1, "filename": filename, "text_as_html": None}
+        },
+        {
+            "type": "text",
+            "element_class": "NarrativeText",
+            "text": (
+                f"**Financial Document Summary**\n"
+                f"- Vendor / Entity: {vendor}\n"
+                f"- Invoice / Receipt #: {inv_no}\n"
+                f"- Date: {date_val}\n"
+                f"- Grand Total: {total_val}"
+            ),
+            "metadata": {
+                "page_number": 1,
+                "filename": filename,
+                "section": f"Receipt: {vendor}",
+            }
+        },
+        {
+            "type": "text",
+            "element_class": "NarrativeText",
+            "text": text.strip(),
+            "metadata": {
+                "page_number": 1,
+                "filename": filename,
+                "section": f"Receipt: {vendor}",
+            }
+        }
+    ]
+    return elements
 
 
 def extract_docx_embedded_images(file_path: Path) -> List[Dict[str, Any]]:
-    """Extracts embedded images from Word documents using python-docx."""
+    """
+    Extracts embedded images from Word documents using python-docx.
+    Filters out tiny icons (< 100x100) and saves real figures to disk for multimodal vision.
+    """
     image_elements = []
     try:
         import docx
+        import io
+        from PIL import Image as PILImage
+
         doc = docx.Document(file_path)
-        for rel in doc.part.rels.values():
+        img_dir = file_path.parent / "extracted_images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+
+        for idx, rel in enumerate(doc.part.rels.values()):
             if "image" in rel.target_ref:
+                img_part = rel.target_part
+                img_bytes = img_part.blob
+                if not img_bytes or len(img_bytes) < 1024:
+                    continue
+
+                try:
+                    pil_img = PILImage.open(io.BytesIO(img_bytes))
+                    w, h = pil_img.size
+                    if w < 100 or h < 100:
+                        continue
+                except Exception:
+                    pass
+
                 img_name = Path(rel.target_ref).name
+                save_path = img_dir / f"{file_path.stem}_{idx}_{img_name}"
+                save_path.write_bytes(img_bytes)
+                caption = f"Diagram {img_name} in {file_path.name}"
+
                 image_elements.append({
                     "type": "image",
                     "element_class": "Image",
-                    "text": f"[Embedded Visual / Diagram: {img_name} in {file_path.name}]",
+                    "text": f"[{caption}]",
                     "metadata": {
                         "page_number": 1,
                         "filename": file_path.name,
+                        "image_path": str(save_path),
+                        "caption": caption,
                         "text_as_html": None,
                     }
                 })
@@ -451,23 +629,99 @@ def extract_pdf_tables(file_path: Path) -> List[Dict[str, Any]]:
 
 
 def extract_pdf_embedded_images(file_path: Path) -> List[Dict[str, Any]]:
-    """Extracts embedded images from PDF documents using pypdf."""
+    """
+    Extracts embedded images from PDF documents using pypdf.
+    Filters out decorative icons/bullets (< 100x100) and saves substantive figures
+    to disk with captions for multimodal vision summarization.
+    """
     image_elements = []
     try:
         import pypdf
+        import io
+        from PIL import Image as PILImage
+
         reader = pypdf.PdfReader(file_path)
+        img_dir = file_path.parent / "extracted_images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+
         for page_idx, page in enumerate(reader.pages):
-            for img in page.images:
-                image_elements.append({
-                    "type": "image",
-                    "element_class": "Image",
-                    "text": f"[Embedded Figure: {img.name} on Page {page_idx + 1}]",
-                    "metadata": {
-                        "page_number": page_idx + 1,
-                        "filename": file_path.name,
-                        "text_as_html": None,
-                    }
-                })
+            page_no = page_idx + 1
+            page_text = page.extract_text() or ""
+
+            # Extract any captions on this page like 'Figure 1: Architecture of Retrio'
+            captions = re.findall(
+                r"(?:Figure|Fig\.?|Diagram|Illustration)\s*\d+[:.-]?\s*([^\n\r]+)",
+                page_text,
+                re.I
+            )
+            default_caption = captions[0].strip() if captions else None
+
+            for img_idx, img in enumerate(page.images):
+                try:
+                    img_bytes = img.data
+                    if not img_bytes or len(img_bytes) < 1024:  # Under 1 KB is an icon
+                        continue
+
+                    # Filter out tiny icons or lines using PIL
+                    try:
+                        pil_img = PILImage.open(io.BytesIO(img_bytes))
+                        w, h = pil_img.size
+                        if w < 100 or h < 100:
+                            continue
+                    except Exception:
+                        pass
+
+                    # Save image file to disk
+                    safe_name = f"{file_path.stem}_p{page_no}_img{img_idx + 1}_{Path(img.name).name}"
+                    save_path = img_dir / safe_name
+                    save_path.write_bytes(img_bytes)
+
+                    caption = default_caption or f"Figure {img_idx + 1} on Page {page_no}"
+                    fig_label = f"Figure on Page {page_no}: {caption}"
+
+                    image_elements.append({
+                        "type": "image",
+                        "element_class": "Image",
+                        "text": f"[{fig_label}]",
+                        "metadata": {
+                            "page_number": page_no,
+                            "filename": file_path.name,
+                            "image_path": str(save_path),
+                            "caption": caption,
+                            "text_as_html": None,
+                        }
+                    })
+                except Exception:
+                    continue
+
+        # Fallback for scanned pages or full-page visual diagrams without raw XObject streams:
+        if not image_elements:
+            try:
+                with pdfplumber.open(file_path) as pdf:
+                    for page_idx, page in enumerate(pdf.pages):
+                        page_no = page_idx + 1
+                        raw_txt = (page.extract_text() or "").strip()
+                        # If page has minimal text, it is likely a visual slide, diagram, or scan
+                        if len(raw_txt) < 100:
+                            img_obj = page.to_image(resolution=150)
+                            safe_name = f"{file_path.stem}_p{page_no}_rendered.png"
+                            save_path = img_dir / safe_name
+                            img_obj.save(save_path)
+                            caption = f"Diagram on Page {page_no} of {file_path.name}"
+                            image_elements.append({
+                                "type": "image",
+                                "element_class": "Image",
+                                "text": f"[{caption}]",
+                                "metadata": {
+                                    "page_number": page_no,
+                                    "filename": file_path.name,
+                                    "image_path": str(save_path),
+                                    "caption": caption,
+                                    "text_as_html": None,
+                                }
+                            })
+            except Exception:
+                pass
     except Exception:
         pass
     return image_elements
@@ -495,6 +749,7 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
     raw_elements: List[Element] = []
     extra_images: List[Dict[str, Any]] = []
     extra_tables: List[Dict[str, Any]] = []
+    parsed_elements: List[Dict[str, Any]] = []
 
     if extension == ".csv":
         parsed_elements = parse_csv_file(path)
@@ -528,13 +783,23 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
         )
         extra_images = extract_docx_embedded_images(path)
     elif extension in [".txt", ".md"]:
-        raw_elements = partition_text(filename=str(path))
+        raw_text = ""
+        try:
+            raw_text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        if raw_text and is_transcript_content(raw_text):
+            parsed_elements = parse_transcript_content(raw_text, path.name)
+        elif raw_text and is_receipt_invoice_content(raw_text):
+            parsed_elements = parse_receipt_invoice_content(raw_text, path.name)
+        else:
+            raw_elements = partition_text(filename=str(path))
     else:
         from unstructured.partition.auto import partition
         raw_elements = partition(filename=str(path))
 
-    # Convert raw unstructured elements to standardized dictionaries if not CSV
-    if extension != ".csv":
+    # Convert raw unstructured elements to standardized dictionaries if not CSV/transcript/receipt
+    if extension != ".csv" and not parsed_elements:
         parsed_elements = []
         for el in raw_elements:
             category = classify_element(el)
@@ -562,6 +827,22 @@ def parse_document(file_path: str | Path) -> Tuple[List[Dict[str, Any]], Dict[st
 
     # Filter out empty text elements
     parsed_elements = [el for el in parsed_elements if el["text"] or el["type"] in ["table", "image"]]
+
+    # Ensure document has a top-level Title element so chunker propagates title to all N chunks
+    has_title = any(el["type"] == "title" for el in parsed_elements)
+    if not has_title and parsed_elements:
+        clean_title_str = path.stem.replace("_", " ").replace("-", " ").strip().title()
+        title_el = {
+            "type": "title",
+            "element_class": "Title",
+            "text": clean_title_str,
+            "metadata": {
+                "page_number": 1,
+                "filename": path.name,
+                "text_as_html": None,
+            }
+        }
+        parsed_elements.insert(0, title_el)
 
     # Compute discovery statistics matching the UI
     stats = {

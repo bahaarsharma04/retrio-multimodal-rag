@@ -1,76 +1,90 @@
 # Retrio: Multi-Modal Hybrid RAG System
 
-A modular, production-grade Retrieval-Augmented Generation (RAG) platform featuring **Unstructured layout parsing**, **Multi-Vector Indexing**, **BM25 + Dense Hybrid Search**, and **Cohere Neural Reranking**.
+A modular, production-grade Retrieval-Augmented Generation (RAG) platform featuring **Format-Aware Canonical Pre-Structuring**, **Layout Analysis**, **Sentence-Bounded Overlap Chunking**, **PostgreSQL + pgvector Single Database Storage**, **BM25 + Dense Hybrid Search**, and **Cohere Neural Reranking**.
 
 ---
 
 ## Architecture Overview
 
 ```
-                                  [ Upload Documents ]
-                               (PDF, DOCX, CSV, TXT, MD)
-                                           │
-                                           ▼
-                            [ 1. Document Partitioning ]
-                      (Unstructured layout analysis & OCR)
-                                           │
-                                           ▼
-                             [ 2. Semantic Chunking ]
-                        (By-Title boundary & table isolation)
-                                           │
-                                           ▼
-                            [ 3. Multi-Modal Summaries ]
-                      (GPT-4o-mini table & figure summarization)
-                                           │
-                                           ▼
-                         [ 4. Vectorization & Hybrid Index ]
-                    ┌──────────────────────┴──────────────────────┐
-                    ▼                                             ▼
-          [ Dense Vectors ]                               [ Sparse Lexical ]
-    (text-embedding-3-small + ChromaDB)                     (BM25 Okapi)
-                    └──────────────────────┬──────────────────────┘
-                                           │
-                                           ▼
-                          [ 5. Reciprocal Rank Fusion (RRF) ]
-                                           │
-                                           ▼
-                             [ 6. Cohere Rerank v3.5 ]
-                                           │
-                                           ▼
-                       [ 7. Grounded Generation & Citations ]
-                           (LangChain LCEL + gpt-4o-mini)
+                                      [ Upload Documents ]
+                        (PDF, DOCX, CSV, TXT, MD, Invoices, Transcripts)
+                                               │
+                                               ▼
+                              [ 1. Format-Aware Pre-Structuring ]
+                    ┌──────────────────────────┼──────────────────────────┐
+                    ▼                          ▼                          ▼
+              [ Tabular/CSV ]            [ Transcripts ]         [ Receipts/Invoices ]
+           (pandas row-batching       (Dialogue & timestamp     (Vendor, Total, Date
+            + repeated headers)         turn normalization)      + line-item tables)
+                    └──────────────────────────┬──────────────────────────┘
+                                               │
+                                               ▼
+                                 [ 2. Document Partitioning ]
+                           (Unstructured layout analysis & OCR)
+                                               │
+                                               ▼
+                                 [ 3. Layout & Title Chunking ]
+                        (Sentence-bounded splitting, 250-char overlap,
+                       metadata & title propagation across all N parts)
+                                               │
+                                               ▼
+                                [ 4. Multi-Modal Summaries ]
+                         (GPT-4o-mini table & figure summarization)
+                                               │
+                                               ▼
+                             [ 5. Vectorization & Storage ]
+                                               │
+                                               ▼
+                              [ Unified Database: PostgreSQL ]
+                         (pgvector 1536d Cosine Embeddings +
+                          Relational Documents, Chunks, Metadata)
+                                               │
+                                               ▼
+                               [ 6. Hybrid Retrieval & RRF ]
+                    ┌──────────────────────────┴──────────────────────────┐
+                    ▼                                                     ▼
+         [ Dense Vector Search ]                                 [ Sparse Lexical ]
+      (PostgreSQL pgvector <=> )                                    (BM25 Okapi)
+                    └──────────────────────────┬──────────────────────────┘
+                                               │
+                                               ▼
+                                  [ 7. Cohere Rerank v3.5 ]
+                                               │
+                                               ▼
+                            [ 8. Grounded Generation & Citations ]
+                                (LangChain LCEL + gpt-4o-mini)
 ```
 
 ---
 
 ## Key Features
 
-1. **Layout-Aware Document Parsing**:
-   * Uses `unstructured` to parse complex document layouts across `.pdf`, `.docx`, `.csv`, and `.txt`.
-   * Automatically isolates narrative text, tables, figures, headers, and metadata.
+### 1. Format-Aware Pre-Structuring
+Before chunking, raw files are classified and normalized into canonical structured elements:
+* **Tabular / CSV (`.csv`):** Automatically batched into 20–30 row segments using `pandas`. **Table column headers are repeated on every chunk** to prevent loss of tabular schema context.
+* **Dialogue Transcripts (`.txt`, `.vtt`):** Detects timestamped lines and speaker turns (`[00:01:23] Speaker:`), grouping dialogues into structured conversational turns.
+* **Receipts & Invoices:** Extracts financial entities (`Vendor`, `Invoice #`, `Date`, `Total Amount`) into a standardized summary header prepended to the line items table.
+* **Unstructured Plain Text:** Synthesizes a clean document title element at the top if no headings exist, anchoring the entire document.
 
-2. **Semantic / By-Title Chunking**:
-   * Chunks documents by logical heading boundaries rather than naive character slicing.
-   * Keeps tables and diagrams intact as dedicated multi-modal atomic units.
+### 2. Title & Metadata Propagation Engine
+* **No Orphaned Sub-Chunks:** When a document section or continuous paragraph is split into $N$ parts, **every single sub-chunk (from Part 1 to $N$) carries `title`, `section`, `part_index`, and `total_parts` in its metadata**.
+* **Sentence-Bounded Splitting with Overlap:** Large text blocks exceeding 1,500 characters are subdivided along complete sentence boundaries (`[.!?]\s+`) with a **250-character trailing sentence overlap** to maintain conceptual continuity across chunk boundaries.
 
-3. **Multi-Vector Representation**:
-   * Generates natural language summaries for tables and figures using `gpt-4o-mini`.
-   * Indexes the **summaries** for high vector similarity matching while retaining the **raw table/diagram structure** for response synthesis.
+### 3. Unified Single Database: PostgreSQL (`pgvector`)
+* **Single Database Architecture:** Unifies relational metadata (`projects`, `documents`, `conversations`, `messages`) and dense vectors (`document_chunks` with 1536-dimensional native `vector` column) inside PostgreSQL.
+* **Native Cosine Similarity (`<=>`):** Dense vector distance is computed directly in PostgreSQL using `pgvector` HNSW/IVFFlat indexes, eliminating separate external vector services.
+* **Transparent Offline Resilience:** Automatic local fallback if Docker/PostgreSQL is momentarily paused, ensuring no data loss.
 
-4. **Two-Stage Hybrid Retrieval & Reranking**:
-   * **Dense Semantic Search**: OpenAI `text-embedding-3-small` in isolated ChromaDB collections.
-   * **Sparse Lexical Search**: BM25 Okapi for precise acronyms, column headers, and keyword matching.
-   * **Reciprocal Rank Fusion (RRF)**: Merges dense and sparse rankings algorithmically.
-   * **Neural Cross-Encoder**: Cohere Rerank (`rerank-v3.5`) scores top candidate chunks for maximum precision.
+### 4. Two-Stage Hybrid Retrieval & Neural Reranking
+* **Dense Semantic Search:** OpenAI `text-embedding-3-small` vectors searched via native PostgreSQL `pgvector` cosine similarity (`<=>`).
+* **Sparse Lexical Search:** BM25 Okapi for precise acronyms, numerical values, and keyword matching.
+* **Reciprocal Rank Fusion (RRF):** Algorithmically merges dense semantic and sparse lexical score distributions.
+* **Cohere Rerank (`rerank-v3.5`):** Cross-encoder reranks top retrieved candidates to maximize precision before LLM generation.
 
-5. **Multi-Turn Conversational Memory**:
-   * Retrio maintains dialogue history within each session to handle pronouns, context shifts, and follow-up inquiries.
-   * Inline source citations with page numbers (`[attention.pdf, Page 2]`).
-
-6. **Interactive 3-Panel Streamlit Interface**:
-   * **Left Panel**: Workspace projects switch/create modals and conversation history with rename/delete actions.
-   * **Center Panel**: Conversational interface with collapsible source telemetry.
-   * **Right Panel**: Project knowledge base with 1-click 5-stage pipeline telemetry inspector.
+### 5. Multi-Turn Conversational Memory & Citations
+* Full conversation management with automatic chat title generation.
+* Grounded generation with inline, verified source citations and page numbers (`[document.pdf, Page 2]`).
 
 ---
 
@@ -79,57 +93,88 @@ A modular, production-grade Retrieval-Augmented Generation (RAG) platform featur
 ```
 Rag application/
 ├── core/
-│   ├── config.py           # Centralized configuration & hyper-parameters
+│   ├── config.py           # Centralized environment & hyper-parameters
 │   ├── projects.py         # Workspace project management
-│   ├── chat_manager.py     # Conversation persistence & auto-titling
-│   ├── parser.py           # Unstructured document layout extraction
-│   ├── chunker.py          # Semantic by-title chunking engine
-│   ├── summarizer.py       # Multi-modal table & figure summarizer
-│   ├── vectorstore.py      # ChromaDB client & vector operations
-│   ├── retriever.py        # BM25 + ChromaDB Hybrid search + Cohere rerank
+│   ├── chat_manager.py     # Conversation history & auto-titling
+│   ├── parser.py           # Layout analysis & format pre-structuring (CSV, Transcripts, Invoices)
+│   ├── chunker.py          # Sentence-bounded chunker with title/metadata propagation
+│   ├── summarizer.py       # Multi-modal table & figure summarizer (GPT-4o-mini)
+│   ├── vectorstore.py      # PostgreSQL pgvector & vector operations engine
+│   ├── retriever.py        # BM25 + Dense Hybrid search + Cohere Rerank
 │   ├── rag_chain.py        # LangChain LCEL RAG chain with citations
-│   └── pipeline.py         # End-to-end 5-stage ingestion coordinator
+│   └── pipeline.py         # 5-stage ingestion coordinator with DB sync
+├── db/
+│   ├── models.py           # SQLAlchemy ORM models (Project, Document, DocumentChunk, Chat)
+│   ├── session.py          # PostgreSQL session management & extension bootstrap
+│   └── alembic/            # Database schema migration scripts
+├── scripts/
+│   ├── test_db.py                      # PostgreSQL & pgvector verification suite
+│   ├── verify_formats_and_metadata.py  # End-to-end format & metadata test suite
+│   └── migrate_json_to_postgres.py     # Data migration from local JSON to PostgreSQL
+├── docker-compose.yml      # PostgreSQL 16 + pgvector container configuration
 ├── app.py                  # Streamlit 3-panel UI & pipeline inspector
-├── requirements.txt        # Production dependencies
+├── requirements.txt        # Python dependencies
 ├── .env.example            # Environment variables template
-└── .gitignore              # Git ignore rules (protects API keys & data)
+└── README.md               # Project documentation
 ```
 
 ---
 
 ## Quickstart
 
-### 1. Clone & Set Up Virtual Environment
-
-```bash
+### 1. Set Up Environment
+```powershell
+# Clone the repository
 git clone <your-repo-url>
 cd "Rag application"
 
-# Create virtual environment
+# Create and activate virtual environment
 python -m venv .venv
-# Activate virtual environment (Windows PowerShell)
 .\.venv\Scripts\Activate.ps1
-```
 
-### 2. Install Dependencies
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 3. Configure API Keys
-
-Copy `.env.example` to `.env` and provide your keys:
-
-```bash
+### 2. Configure Environment Variables
+Copy `.env.example` to `.env` and fill in your keys:
+```env
 OPENAI_API_KEY=your-openai-api-key-here
-COHERE_API_KEY=your-cohere-api-key-here    # Optional: Free tier trial key
+COHERE_API_KEY=your-cohere-api-key-here       # Optional: Free tier trial key
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/retrio_db
 ```
 
-### 4. Run Application
+### 3. Start Database (Docker)
+Launch PostgreSQL with `pgvector`:
+```powershell
+docker compose up -d
+```
 
-```bash
+### 4. Verification & Automated Testing Suite
+Run security checks and model accuracy evaluations after every code change:
+```powershell
+# 1. Security, JWT & RBAC Verification (Multi-tenancy, Admin Super-Visibility, Rate Limiting)
+.venv\Scripts\python.exe scripts\test_security_rbac.py
+
+# 2. Automated Model Accuracy & Regression Benchmark:
+# Quick smoke test (~25s):
+.venv\Scripts\python.exe scripts\evaluate_accuracy.py --quick
+
+# Compare against reference baseline (fails with exit code 1 if accuracy regressed):
+.venv\Scripts\python.exe scripts\evaluate_accuracy.py --compare
+
+# Set/update gold standard baseline after verified improvements:
+.venv\Scripts\python.exe scripts\evaluate_accuracy.py --set-baseline
+
+# Verify PostgreSQL & pgvector connection and vector search
+.venv\Scripts\python.exe scripts\test_db.py
+
+# Verify format pre-structuring (CSV, Transcripts, Invoices, Unstructured text)
+.venv\Scripts\python.exe scripts\verify_formats_and_metadata.py
+```
+
+### 5. Launch Application
+```powershell
 streamlit run app.py
 ```
-
-Access the UI at `http://localhost:8501`.
+Open `http://localhost:8501` in your browser.

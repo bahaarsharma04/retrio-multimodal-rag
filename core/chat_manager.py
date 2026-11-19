@@ -53,6 +53,7 @@ def _save_chat_json(
     chat_id: str,
     title: str,
     messages: List[Dict[str, Any]],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Persists a conversation to disk as JSON."""
     chats_dir = get_project_chats_dir(project_id)
@@ -68,10 +69,13 @@ def _save_chat_json(
         if existing:
             created_ts = existing.get("created_timestamp", now_ts)
             created_str = existing.get("created_at", now_str)
+            if not user_id:
+                user_id = existing.get("user_id")
 
     chat_data = {
         "chat_id": chat_id,
         "project_id": project_id,
+        "user_id": user_id,
         "title": title.strip() or "Untitled Chat",
         "created_at": created_str,
         "created_timestamp": created_ts,
@@ -121,6 +125,7 @@ def _sync_json_to_db(session, project_id: str):
             conv = Conversation(
                 id=cid,
                 project_id=project_id,
+                user_id=jc.get("user_id"),
                 title=jc.get("title", "Untitled Chat"),
             )
             session.add(conv)
@@ -134,6 +139,8 @@ def _sync_json_to_db(session, project_id: str):
                     sources=m.get("sources"),
                 )
                 session.add(msg)
+        elif not existing.user_id and jc.get("user_id"):
+            existing.user_id = jc.get("user_id")
     try:
         session.commit()
     except Exception:
@@ -144,42 +151,53 @@ def _sync_json_to_db(session, project_id: str):
 # PRIMARY CHAT MANAGER (POSTGRESQL + ORM WITH DUAL-MODE FALLBACK)
 # ====================================================================
 
-def list_chats(project_id: str) -> List[Dict[str, Any]]:
-    """Lists all saved chats for a given project, sorted newest first."""
+def list_chats(project_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Lists all saved chats for a given project, strictly isolated to the specified user."""
     if is_db_connected():
         try:
             init_db()
             with get_db_session() as session:
                 _sync_json_to_db(session, project_id)
-                convs = (
-                    session.query(Conversation)
-                    .filter(Conversation.project_id == project_id)
-                    .order_by(Conversation.updated_at.desc())
-                    .all()
-                )
+                query = session.query(Conversation).filter(Conversation.project_id == project_id)
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                else:
+                    return []
+                convs = query.order_by(Conversation.updated_at.desc()).all()
                 return [c.to_dict() for c in convs]
         except Exception as e:
             print(f"Warning: Database error in list_chats, falling back to JSON: {e}")
 
-    return _list_chats_json(project_id)
+    chats = _list_chats_json(project_id)
+    if user_id:
+        chats = [c for c in chats if c.get("user_id") == user_id]
+    else:
+        return []
+    return chats
 
 
-def get_chat(project_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
-    """Loads a specific chat session."""
+def get_chat(project_id: str, chat_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Loads a specific chat session with strict user verification."""
     if is_db_connected():
         try:
             with get_db_session() as session:
-                conv = (
-                    session.query(Conversation)
-                    .filter(Conversation.id == chat_id, Conversation.project_id == project_id)
-                    .first()
+                query = session.query(Conversation).filter(
+                    Conversation.id == chat_id,
+                    Conversation.project_id == project_id
                 )
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                conv = query.first()
                 if conv:
                     return conv.to_dict()
+                return None
         except Exception as e:
             print(f"Warning: Database error in get_chat, falling back to JSON: {e}")
 
-    return _get_chat_json(project_id, chat_id)
+    chat = _get_chat_json(project_id, chat_id)
+    if chat and user_id and chat.get("user_id") != user_id:
+        return None
+    return chat
 
 
 def save_chat(
@@ -187,6 +205,7 @@ def save_chat(
     chat_id: str,
     title: str,
     messages: List[Dict[str, Any]],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Saves or updates a conversation session in PostgreSQL (and syncs to JSON)."""
     if is_db_connected():
@@ -200,11 +219,14 @@ def save_chat(
                     conv = Conversation(
                         id=chat_id,
                         project_id=project_id,
+                        user_id=user_id,
                         title=clean_title,
                     )
                     session.add(conv)
                 else:
                     conv.title = clean_title
+                    if user_id:
+                        conv.user_id = user_id
                     conv.updated_at = func.now()
 
                 session.flush()
@@ -224,46 +246,60 @@ def save_chat(
                 session.refresh(conv)
 
                 # Keep JSON in sync as secondary backup
-                _save_chat_json(project_id, chat_id, clean_title, messages)
+                _save_chat_json(project_id, chat_id, clean_title, messages, user_id=user_id)
                 return conv.to_dict()
         except Exception as e:
             print(f"Warning: Database error in save_chat, falling back to JSON: {e}")
 
-    return _save_chat_json(project_id, chat_id, title, messages)
+    return _save_chat_json(project_id, chat_id, title, messages, user_id=user_id)
 
 
-def rename_chat(project_id: str, chat_id: str, new_title: str) -> bool:
-    """Renames an existing chat."""
+def rename_chat(project_id: str, chat_id: str, new_title: str, user_id: Optional[str] = None) -> bool:
+    """Renames an existing chat for the specified user."""
     if is_db_connected():
         try:
             with get_db_session() as session:
-                conv = session.query(Conversation).filter(Conversation.id == chat_id).first()
+                query = session.query(Conversation).filter(Conversation.id == chat_id, Conversation.project_id == project_id)
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                conv = query.first()
                 if conv:
                     conv.title = new_title.strip() or "Untitled Chat"
                     conv.updated_at = func.now()
                     session.commit()
                     _rename_chat_json(project_id, chat_id, new_title)
                     return True
+                return False
         except Exception as e:
             print(f"Warning: Database error in rename_chat, falling back to JSON: {e}")
 
+    chat = _get_chat_json(project_id, chat_id)
+    if chat and user_id and chat.get("user_id") != user_id:
+        return False
     return _rename_chat_json(project_id, chat_id, new_title)
 
 
-def delete_chat(project_id: str, chat_id: str) -> bool:
-    """Deletes a chat from database and disk."""
+def delete_chat(project_id: str, chat_id: str, user_id: Optional[str] = None) -> bool:
+    """Deletes a chat from database and disk for the specified user."""
     if is_db_connected():
         try:
             with get_db_session() as session:
-                conv = session.query(Conversation).filter(Conversation.id == chat_id).first()
+                query = session.query(Conversation).filter(Conversation.id == chat_id, Conversation.project_id == project_id)
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                conv = query.first()
                 if conv:
                     session.delete(conv)
                     session.commit()
                     _delete_chat_json(project_id, chat_id)
                     return True
+                return False
         except Exception as e:
             print(f"Warning: Database error in delete_chat, falling back to JSON: {e}")
 
+    chat = _get_chat_json(project_id, chat_id)
+    if chat and user_id and chat.get("user_id") != user_id:
+        return False
     return _delete_chat_json(project_id, chat_id)
 
 

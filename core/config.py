@@ -22,6 +22,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/retrio_db")
 
+# JWT & Security Configuration
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "retrio-secret-key-32-bytes-minimum-for-security-2026")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+
 # Model Configurations
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
@@ -34,4 +39,4 @@ CHUNK_OVERLAP_CHARACTERS = 250
 
 # Retrieval Defaults
 HYBRID_SEARCH_TOP_K = 35
-RERANK_TOP_N = 8
+RERANK_TOP_N = 12

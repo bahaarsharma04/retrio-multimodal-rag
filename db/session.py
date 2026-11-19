@@ -46,6 +46,21 @@ def init_db() -> bool:
                 print(f"Notice: Extension initialization check skipped: {e}")
 
         Base.metadata.create_all(bind=engine)
+
+        if "postgresql" in DATABASE_URL:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS title VARCHAR(255) DEFAULT \'General\';'))
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS part_index INTEGER DEFAULT 1;'))
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS total_parts INTEGER DEFAULT 1;'))
+                    # User ownership columns
+                    conn.execute(text('ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.execute(text('ALTER TABLE documents ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.execute(text('ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.commit()
+            except Exception as e:
+                print(f"Notice: Column migration note: {e}")
         return True
     except Exception as e:
         print(f"Warning: Database init failed: {e}")

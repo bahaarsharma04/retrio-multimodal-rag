@@ -9,7 +9,7 @@ from core.config import (
     HYBRID_SEARCH_TOP_K,
     RERANK_TOP_N,
 )
-from core.vectorstore import get_project_vectorstore, get_all_chunks
+from core.vectorstore import dense_similarity_search, get_all_chunks
 from core.logger import retrieval_logger
 
 BM25_STOPWORDS = {
@@ -47,14 +47,13 @@ def tokenize_for_bm25(text: str, filter_stopwords: bool = True) -> List[str]:
 
 class HybridRetriever:
     """
-    Combines Dense Vector Retrieval (ChromaDB + Embeddings) with
+    Combines Dense Vector Retrieval (PostgreSQL pgvector) with
     Sparse Lexical Retrieval (BM25 Okapi) using Reciprocal Rank Fusion (RRF),
     followed by an optional Cohere neural reranking stage.
     """
 
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self.vectorstore = get_project_vectorstore(project_id)
         self.chunks: List[Dict[str, Any]] = get_all_chunks(project_id)
         
         # Initialize BM25 corpus index with cleaned, punctuation-free tokens
@@ -67,38 +66,12 @@ class HybridRetriever:
             self.bm25 = BM25Okapi(tokenized_corpus)
 
     def _dense_search(self, query: str, k: int, filename_filter: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Performs semantic similarity search via ChromaDB."""
+        """Performs semantic similarity search via PostgreSQL (pgvector)."""
         if not self.chunks:
             retrieval_logger.warning(f"Dense search skipped for Project '{self.project_id}': no chunks indexed.")
             return []
-        t0 = time.perf_counter()
         try:
-            search_kwargs: Dict[str, Any] = {"k": k}
-            if filename_filter:
-                search_kwargs["filter"] = {"filename": filename_filter}
-            results = self.vectorstore.similarity_search_with_score(query, **search_kwargs)
-            dense_docs = []
-            for doc, score in results:
-                meta = doc.metadata or {}
-                content = meta.get("raw_content") or doc.page_content
-                summary = meta.get("summary") or None
-                # Skip bare placeholder chunks that contain no real visual summary or caption
-                if content.strip().startswith(("[Embedded Figure:", "[Embedded Visual")) and not summary:
-                    continue
-                dense_docs.append({
-                    "chunk_id": meta.get("chunk_id"),
-                    "content": content,
-                    "filename": meta.get("filename", "unknown"),
-                    "page_number": meta.get("page_number", 1),
-                    "type": meta.get("type", "text"),
-                    "section": meta.get("section") or "General",
-                    "summary": summary,
-                    "score": float(score) if score is not None else 0.0,
-                })
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            top_score = f"{dense_docs[0]['score']:.4f}" if dense_docs else "None"
-            retrieval_logger.info(f"Dense search: retrieved {len(dense_docs)} chunks in {elapsed_ms:.1f}ms | Filter: {filename_filter or 'none'} | Top distance/score: {top_score}")
-            return dense_docs
+            return dense_similarity_search(self.project_id, query, k=k, filename_filter=filename_filter)
         except Exception as e:
             retrieval_logger.error(f"Dense search failed: {e}", exc_info=True)
             return []
@@ -122,7 +95,7 @@ class HybridRetriever:
             if scores[idx] <= 0:
                 break
             c = self.chunks[idx]
-            if filename_filter and c.get("filename") != filename_filter:
+            if filename_filter and (c.get("filename") or "").lower() != filename_filter.lower():
                 continue
             content = c.get("content", "")
             summary = c.get("summary")
@@ -209,7 +182,12 @@ class HybridRetriever:
         try:
             import cohere
             co = cohere.ClientV2(api_key=api_key)
-            docs_text = [c["content"] for c in candidates]
+            docs_text = []
+            for c in candidates:
+                txt = (c.get("content") or "").strip()
+                if not txt:
+                    txt = (c.get("summary") or "").strip() or "Document snippet"
+                docs_text.append(txt[:4000])
             
             response = co.rerank(
                 model="rerank-v3.5",
@@ -259,6 +237,31 @@ class HybridRetriever:
 
         # Apply two-stage reranker
         final_results = self._rerank_with_cohere(query, fused_candidates, top_n=top_n)
+
+        # Document metadata guardrail: Ensure page 1 / title block chunks are present for document metadata queries
+        q_lower = query.lower()
+        if any(w in q_lower for w in ["author", "who wrote", "written by", "title", "publisher", "isbn", "editor"]):
+            page1_chunks = []
+            for c in self.chunks:
+                if filename_filter and (c.get("filename") or "").lower() != filename_filter.lower():
+                    continue
+                if c.get("page_number") == 1:
+                    page1_chunks.append({
+                        "chunk_id": c.get("chunk_id"),
+                        "content": c.get("content", ""),
+                        "filename": c.get("filename", "unknown"),
+                        "page_number": 1,
+                        "type": c.get("type", "text"),
+                        "section": c.get("section") or "General",
+                        "summary": c.get("summary"),
+                        "score": 0.0,
+                        "retrieval_method": "metadata_anchor",
+                    })
+            if page1_chunks:
+                existing_cids = {r.get("chunk_id") for r in final_results}
+                for p1 in reversed(page1_chunks):
+                    if p1.get("chunk_id") not in existing_cids:
+                        final_results.insert(0, p1)
 
         total_ms = (time.perf_counter() - t0) * 1000
         retrieval_logger.info(f"✔ Retrieval pipeline completed in {total_ms:.1f}ms: returned {len(final_results)} chunks to LLM.")

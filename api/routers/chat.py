@@ -1,6 +1,6 @@
 import uuid
-from typing import List
-from fastapi import APIRouter, HTTPException, Path, status
+from typing import List, Dict, Any
+from fastapi import APIRouter, HTTPException, Path, Request, Depends, status
 
 from api.schemas import (
     ChatRequest,
@@ -19,6 +19,8 @@ from core.chat_manager import (
     delete_chat,
     generate_chat_title,
 )
+from core.limiter import limiter
+from api.deps import get_current_active_user
 
 router = APIRouter(prefix="/api/v1", tags=["Conversations & RAG Chat"])
 
@@ -26,14 +28,17 @@ router = APIRouter(prefix="/api/v1", tags=["Conversations & RAG Chat"])
 @router.post(
     "/projects/{project_id}/chat",
     response_model=ChatResponse,
-    summary="Ask a question grounded in project documents",
-    description="Executes hybrid retrieval (BM25 + ChromaDB + Cohere) and multi-turn generation, persisting dialogue to PostgreSQL.",
+    summary="Ask a question grounded in project documents (ownership verified)",
+    description="Executes hybrid retrieval (BM25 + ChromaDB + Cohere) and multi-turn generation. Rate limited to 15 queries per minute.",
 )
+@limiter.limit("15/minute")
 def chat_with_project(
+    request: Request,
     project_id: str = Path(..., description="Project workspace ID"),
     payload: ChatRequest = ...,
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
 ):
-    project = get_project(project_id)
+    project = get_project(project_id, owner_id=current_user["id"])
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -41,7 +46,7 @@ def chat_with_project(
         )
 
     cid = payload.conversation_id or str(uuid.uuid4())
-    existing_chat = get_chat(project_id, cid)
+    existing_chat = get_chat(project_id, cid, user_id=current_user["id"])
 
     if existing_chat:
         messages = existing_chat.get("messages", [])
@@ -76,12 +81,13 @@ def chat_with_project(
         "sources": sources,
     })
 
-    # 4. Save dialogue turn into PostgreSQL (with JSON backup)
+    # 4. Save dialogue turn into PostgreSQL (with JSON backup) scoped to current_user
     save_chat(
         project_id=project_id,
         chat_id=cid,
         title=title,
         messages=messages,
+        user_id=current_user["id"],
     )
 
     return ChatResponse(
@@ -96,19 +102,22 @@ def chat_with_project(
 @router.get(
     "/projects/{project_id}/conversations",
     response_model=List[ConversationSummary],
-    summary="List all conversations in a project",
+    summary="List all conversations in a project (ownership verified)",
 )
+@limiter.limit("60/minute")
 def list_project_conversations(
+    request: Request,
     project_id: str = Path(..., description="Project workspace ID"),
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
 ):
-    project = get_project(project_id)
+    project = get_project(project_id, owner_id=current_user["id"])
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project with ID '{project_id}' not found.",
         )
 
-    chats = list_chats(project_id)
+    chats = list_chats(project_id, user_id=current_user["id"])
     summaries = []
     for c in chats:
         summaries.append(
@@ -127,13 +136,23 @@ def list_project_conversations(
 @router.get(
     "/projects/{project_id}/conversations/{conversation_id}",
     response_model=ConversationResponse,
-    summary="Retrieve full conversation history",
+    summary="Retrieve full conversation history (ownership verified)",
 )
+@limiter.limit("60/minute")
 def get_conversation_details(
+    request: Request,
     project_id: str = Path(..., description="Project workspace ID"),
     conversation_id: str = Path(..., description="Conversation ID"),
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
 ):
-    chat = get_chat(project_id, conversation_id)
+    project = get_project(project_id, owner_id=current_user["id"])
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project with ID '{project_id}' not found.",
+        )
+
+    chat = get_chat(project_id, conversation_id, user_id=current_user["id"])
     if not chat:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -144,14 +163,24 @@ def get_conversation_details(
 
 @router.patch(
     "/projects/{project_id}/conversations/{conversation_id}",
-    summary="Rename a conversation",
+    summary="Rename a conversation (ownership verified)",
 )
+@limiter.limit("30/minute")
 def rename_conversation(
+    request: Request,
     project_id: str = Path(..., description="Project workspace ID"),
     conversation_id: str = Path(..., description="Conversation ID"),
     payload: RenameChatRequest = ...,
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
 ):
-    success = rename_chat(project_id, conversation_id, payload.title)
+    project = get_project(project_id, owner_id=current_user["id"])
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project with ID '{project_id}' not found.",
+        )
+
+    success = rename_chat(project_id, conversation_id, payload.title, user_id=current_user["id"])
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -162,13 +191,23 @@ def rename_conversation(
 
 @router.delete(
     "/projects/{project_id}/conversations/{conversation_id}",
-    summary="Delete a conversation",
+    summary="Delete a conversation (ownership verified)",
 )
+@limiter.limit("20/minute")
 def remove_conversation(
+    request: Request,
     project_id: str = Path(..., description="Project workspace ID"),
     conversation_id: str = Path(..., description="Conversation ID"),
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
 ):
-    success = delete_chat(project_id, conversation_id)
+    project = get_project(project_id, owner_id=current_user["id"])
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project with ID '{project_id}' not found.",
+        )
+
+    success = delete_chat(project_id, conversation_id, user_id=current_user["id"])
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -2,7 +2,7 @@ import uuid
 from typing import Dict, Any, List, Optional
 from sqlalchemy import (
     Column, String, BigInteger, Integer, Float, Text,
-    DateTime, ForeignKey, JSON
+    DateTime, ForeignKey, JSON, Boolean
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -20,21 +20,56 @@ except ImportError:
 from db.base import Base
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(255), nullable=True, default="")
+    role = Column(String(32), default="user", nullable=False)  # "user", "admin"
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    projects = relationship("Project", back_populates="owner", cascade="all, delete-orphan")
+    conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
+    documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "email": self.email,
+            "full_name": self.full_name or "",
+            "role": self.role,
+            "is_active": self.is_active,
+            "created_at": self.created_at.strftime("%d/%m/%Y %H:%M") if self.created_at else "",
+        }
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     name = Column(String(255), nullable=False)
     description = Column(Text, default="")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    owner = relationship("User", back_populates="projects")
     documents = relationship("Document", back_populates="project", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="project", cascade="all, delete-orphan")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
+            "owner_id": self.owner_id,
             "name": self.name,
             "description": self.description,
             "created_at": self.created_at.strftime("%d/%m/%Y") if self.created_at else "",
@@ -52,6 +87,12 @@ class Document(Base):
         nullable=False,
         index=True,
     )
+    user_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     filename = Column(String(512), nullable=False)
     file_path = Column(String(1024), nullable=False)
     file_hash = Column(String(64), nullable=False, index=True)
@@ -63,6 +104,7 @@ class Document(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     project = relationship("Project", back_populates="documents")
+    user = relationship("User", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
     pipeline_runs = relationship("PipelineRun", back_populates="document", cascade="all, delete-orphan")
 
@@ -70,6 +112,7 @@ class Document(Base):
         return {
             "id": self.id,
             "project_id": self.project_id,
+            "user_id": self.user_id,
             "filename": self.filename,
             "file_path": self.file_path,
             "file_hash": self.file_hash,
@@ -161,9 +204,18 @@ class DocumentChunk(Base):
         nullable=False,
         index=True,
     )
+    user_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     chunk_index = Column(Integer, nullable=False)
     chunk_type = Column(String(50), default="text", index=True)
+    title = Column(String(255), default="General", index=True)
     section = Column(String(255), default="General", index=True)
+    part_index = Column(Integer, default=1)
+    total_parts = Column(Integer, default=1)
     page_numbers = Column(JSON, nullable=False, default=list)
     content = Column(Text, nullable=False)
     text_as_html = Column(Text, nullable=True)
@@ -181,9 +233,13 @@ class DocumentChunk(Base):
             "id": self.id,
             "document_id": self.document_id,
             "project_id": self.project_id,
+            "user_id": self.user_id,
             "chunk_index": self.chunk_index,
             "chunk_type": self.chunk_type,
-            "section": self.section,
+            "title": self.title or "General",
+            "section": self.section or "General",
+            "part_index": self.part_index or 1,
+            "total_parts": self.total_parts or 1,
             "page_numbers": self.page_numbers or [1],
             "content": self.content,
             "text_as_html": self.text_as_html,
@@ -202,12 +258,19 @@ class Conversation(Base):
         nullable=False,
         index=True,
     )
+    user_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     title = Column(String(255), nullable=False, default="Untitled Chat")
     active_filters = Column(JSON, default=list)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     project = relationship("Project", back_populates="conversations")
+    user = relationship("User", back_populates="conversations")
     messages = relationship(
         "Message",
         back_populates="conversation",
@@ -219,6 +282,7 @@ class Conversation(Base):
         return {
             "chat_id": self.id,
             "project_id": self.project_id,
+            "user_id": self.user_id,
             "title": self.title,
             "active_filters": self.active_filters or [],
             "created_at": self.created_at.strftime("%d/%m/%Y %H:%M") if self.created_at else "",

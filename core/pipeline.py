@@ -287,20 +287,210 @@ def run_ingestion_pipeline(
     delete_document_checkpoint(project_id, filename)
     ingest_logger.info(f"✔ Pipeline successfully completed for '{filename}' | Recorded in: {record_path.name}")
 
+    # Synchronize with PostgreSQL if database is active
+    sync_document_chunks_to_db(
+        project_id=project_id,
+        filename=filename,
+        file_path=file_path,
+        document_hash=document_hash,
+        chunks=all_chunks_for_file,
+    )
+
     return pipeline_result
 
 
+def sync_document_chunks_to_db(
+    project_id: str,
+    filename: str,
+    file_path: Path,
+    document_hash: str,
+    chunks: List[Dict[str, Any]],
+    user_id: Optional[str] = None,
+) -> None:
+    """Synchronizes completed document chunks to PostgreSQL database if connected."""
+    try:
+        from db.session import is_db_connected, get_db_session
+        if not is_db_connected():
+            return
+        from db.models import Document, DocumentChunk, Project
+        import uuid
+
+        def clean_pg_text(val):
+            if val is None:
+                return None
+            return str(val).replace("\x00", "")
+
+        with get_db_session() as s:
+            if not user_id:
+                proj = s.query(Project).filter(Project.id == project_id).first()
+                if proj and proj.owner_id:
+                    user_id = proj.owner_id
+
+            doc = s.query(Document).filter(Document.project_id == project_id, Document.filename == filename).first()
+            if not doc:
+                doc = Document(
+                    id=str(uuid.uuid4()),
+                    project_id=project_id,
+                    user_id=user_id,
+                    filename=filename,
+                    file_path=str(file_path),
+                    file_hash=document_hash,
+                    ingestion_status="completed",
+                )
+                s.add(doc)
+                s.flush()
+            else:
+                doc.file_hash = document_hash
+                doc.ingestion_status = "completed"
+                if user_id:
+                    doc.user_id = user_id
+
+            # Fetch existing chunks to preserve vector embeddings during metadata sync
+            existing_chunks = s.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).all()
+            existing_map = {c_obj.id: c_obj for c_obj in existing_chunks}
+            new_chunk_ids = {str(c.get("chunk_id")) for c in chunks}
+
+            # Delete any obsolete chunks no longer present
+            for old_id, old_chunk in existing_map.items():
+                if old_id not in new_chunk_ids:
+                    s.delete(old_chunk)
+
+            for idx, c in enumerate(chunks, 1):
+                cid = str(c.get("chunk_id"))
+                p_raw = c.get("page_range") or c.get("page_number") or 1
+                if isinstance(p_raw, list):
+                    pages = [int(x) for x in p_raw if str(x).isdigit()] or [1]
+                elif "-" in str(p_raw):
+                    pages = [int(p) for p in str(p_raw).split("-") if p.isdigit()] or [1]
+                else:
+                    pages = [int(p_raw)] if str(p_raw).isdigit() else [1]
+
+                db_c = existing_map.get(cid)
+                if db_c:
+                    db_c.chunk_index = idx
+                    db_c.chunk_type = c.get("type", "text")
+                    db_c.title = clean_pg_text(c.get("title") or c.get("section") or "General")
+                    db_c.section = clean_pg_text(c.get("section") or "General")
+                    db_c.part_index = int(c.get("part_index") or 1)
+                    db_c.total_parts = int(c.get("total_parts") or 1)
+                    db_c.page_numbers = pages
+                    db_c.content = clean_pg_text(c.get("content", ""))
+                    db_c.text_as_html = clean_pg_text(c.get("text_as_html"))
+                    db_c.summary = clean_pg_text(c.get("summary"))
+                    db_c.indexed_text = clean_pg_text(c.get("indexed_text"))
+                    db_c.content_hash = c.get("content_hash", "")
+                    db_c.char_count = c.get("char_count", len(c.get("content", "")))
+                else:
+                    db_c = DocumentChunk(
+                        id=cid,
+                        document_id=doc.id,
+                        project_id=project_id,
+                        user_id=user_id,
+                        chunk_index=idx,
+                        chunk_type=c.get("type", "text"),
+                        title=clean_pg_text(c.get("title") or c.get("section") or "General"),
+                        section=clean_pg_text(c.get("section") or "General"),
+                        part_index=int(c.get("part_index") or 1),
+                        total_parts=int(c.get("total_parts") or 1),
+                        page_numbers=pages,
+                        content=clean_pg_text(c.get("content", "")),
+                        text_as_html=clean_pg_text(c.get("text_as_html")),
+                        summary=clean_pg_text(c.get("summary")),
+                        indexed_text=clean_pg_text(c.get("indexed_text")),
+                        content_hash=c.get("content_hash", ""),
+                        char_count=c.get("char_count", len(c.get("content", ""))),
+                    )
+                    s.add(db_c)
+            s.commit()
+    except Exception as e:
+        ingest_logger.warning(f"Notice: Background sync to PostgreSQL skipped: {e}")
+
+
 def delete_source_document(project_id: str, filename: str) -> bool:
-    """Delete vector data first; only remove files after Chroma confirms deletion."""
+    """
+    Deletes vector data from PostgreSQL and ChromaDB, and removes all associated files from disk.
+    Ensures complete, case-insensitive purging with zero orphan remnants.
+    """
     from core.vectorstore import delete_file_from_vectorstore
     delete_file_from_vectorstore(project_id, filename)
+
     documents = get_project_docs_dir(project_id)
-    for path in (
-        documents / filename,
-        get_document_record_path(project_id, filename),
-        get_document_checkpoint_path(project_id, filename),
-    ):
-        if path.exists():
-            path.unlink()
+    fn_lower = filename.lower()
+    if documents.exists():
+        for f in list(documents.iterdir()):
+            if f.is_file():
+                name_lower = f.name.lower()
+                if (
+                    name_lower == fn_lower
+                    or name_lower == f"{fn_lower}.pipeline.json"
+                    or name_lower == f"{fn_lower}.checkpoint.json"
+                    or name_lower.startswith(f"{fn_lower}.")
+                ):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+
+    try:
+        from db.session import is_db_connected, get_db_session
+        from db.models import Document
+        from sqlalchemy import func
+        if is_db_connected():
+            with get_db_session() as s:
+                docs = s.query(Document).filter(
+                    Document.project_id == project_id,
+                    func.lower(Document.filename) == filename.lower()
+                ).all()
+                for d in docs:
+                    s.delete(d)
+                s.commit()
+    except Exception as e:
+        ingest_logger.warning(f"Notice: Document record deletion from PostgreSQL skipped: {e}")
+
     ingest_logger.info(f"Source document '{filename}' and associated vectors deleted from Project: {project_id}")
     return True
+
+
+def reconcile_project_documents(project_id: str) -> Dict[str, Any]:
+    """
+    Ensures a single source of truth between disk and database:
+    1. Removes any ghost document records from PostgreSQL and ChromaDB if their physical file is not on disk.
+    2. Returns the synchronized list of active documents.
+    """
+    documents_dir = get_project_docs_dir(project_id)
+    disk_files = {}
+    if documents_dir.exists():
+        for f in documents_dir.iterdir():
+            if (
+                f.is_file()
+                and not f.name.endswith(".pipeline.json")
+                and not f.name.endswith(".checkpoint.json")
+            ):
+                disk_files[f.name.lower()] = f.name
+
+    purged_ghosts = []
+    try:
+        from db.session import is_db_connected, get_db_session
+        from db.models import Document as DBDocument
+        from core.vectorstore import delete_file_from_vectorstore
+
+        if is_db_connected():
+            with get_db_session() as s:
+                db_docs = s.query(DBDocument).filter(DBDocument.project_id == project_id).all()
+                for doc in db_docs:
+                    if doc.filename.lower() not in disk_files:
+                        purged_ghosts.append(doc.filename)
+
+            for ghost in purged_ghosts:
+                delete_file_from_vectorstore(project_id, ghost)
+                ingest_logger.info(f"Reconciliation: Purged ghost document '{ghost}' from database for Project {project_id}")
+    except Exception as e:
+        ingest_logger.warning(f"Notice: reconcile_project_documents encountered an issue: {e}")
+
+    if purged_ghosts:
+        ingest_logger.info(f"Reconciled Project {project_id}: purged {len(purged_ghosts)} ghost documents: {purged_ghosts}")
+
+    return {
+        "active_disk_files": list(disk_files.values()),
+        "purged_ghosts": purged_ghosts,
+    }
