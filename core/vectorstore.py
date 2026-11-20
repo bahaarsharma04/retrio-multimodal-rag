@@ -6,13 +6,12 @@ import os
 import random
 import time
 import uuid
-from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple
 
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.embeddings import Embeddings
 
-from core.config import PROJECTS_DIR, DEFAULT_EMBEDDING_MODEL, OPENAI_API_KEY
+from core.config import DEFAULT_EMBEDDING_MODEL, OPENAI_API_KEY
 from core.logger import embedding_logger
 from db.session import is_db_connected, get_db_session
 from db.models import Project as DBProject, Document as DBDocument, DocumentChunk as DBDocumentChunk
@@ -370,7 +369,7 @@ def delete_file_from_vectorstore(project_id: str, filename: str) -> bool:
         doc_ids_subquery = s.query(DBDocument.id).filter(
             DBDocument.project_id == project_id,
             func.lower(DBDocument.filename) == filename.lower()
-        ).subquery()
+        ).scalar_subquery()
         s.query(DBDocumentChunk).filter(
             DBDocumentChunk.project_id == project_id,
             DBDocumentChunk.document_id.in_(doc_ids_subquery)

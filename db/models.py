@@ -1,5 +1,5 @@
 import uuid
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from sqlalchemy import (
     Column, String, BigInteger, Integer, Float, Text,
     DateTime, ForeignKey, JSON, Boolean

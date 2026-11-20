@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db.session import get_db_session, is_db_connected
 from db.models import Project, Document, DocumentChunk, Conversation, Message
-from sqlalchemy import select, func
+from sqlalchemy import select
 
 
 def run_test():

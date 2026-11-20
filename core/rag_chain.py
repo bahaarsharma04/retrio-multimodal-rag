@@ -392,6 +392,62 @@ def handle_meta_conversational_query(
     }
 
 
+def is_greeting_query(query: str) -> bool:
+    """
+    Detects whether a user query is a standalone greeting or salutation
+    (e.g., 'hi', 'hello', 'hey', 'good morning', 'greetings', 'what's up'),
+    rather than a document-directed factual query.
+    
+    Guardrail: If the query mentions document entities ('document', 'file', 'pdf', 'paper', 'chapter', 'table', 'summary'),
+    it is treated as a document query to prevent false-positive interception.
+    """
+    q = query.strip().lower()
+    q_clean = re.sub(r"[!.,?]+$", "", q).strip()
+
+    # Guardrail: If document-related terms appear, do NOT intercept
+    doc_anchors = ["document", "file", "pdf", "docx", "text", "chapter", "section", "page", "author", "table", "chart", "diagram", "figure", "paper", "data", "summary", "analyze", "explain"]
+    if any(re.search(r"\b" + re.escape(w) + r"\b", q_clean) for w in doc_anchors):
+        return False
+
+    greetings = {
+        "hi", "hello", "hey", "hey there", "hi there", "hello there",
+        "good morning", "good afternoon", "good evening", "greetings",
+        "howdy", "hola", "yo", "sup", "what's up", "whats up",
+    }
+    return q_clean in greetings or bool(re.match(r"^(hi|hello|hey|greetings)\b", q_clean) and len(q_clean.split()) <= 3)
+
+
+def handle_greeting_query(query: str, project_id: str) -> Dict[str, Any]:
+    """
+    Returns an immediate, friendly welcome response from Retrio,
+    bypassing vector database searches and avoiding false document-refusal fallbacks.
+    """
+    from core.vectorstore import get_all_chunks
+    try:
+        has_docs = bool(get_all_chunks(project_id))
+    except Exception:
+        has_docs = False
+
+    if has_docs:
+        greeting_text = (
+            "Hello! I am Retrio, your technical research and document assistant. "
+            "Your project documents are loaded and ready. What would you like to explore or search in them today?"
+        )
+    else:
+        greeting_text = (
+            "Hello! I am Retrio, your technical research assistant. "
+            "Please upload your documents (PDF, DOCX, CSV, TXT, MD) to this project, "
+            "and I will help you analyze, search, and answer questions grounded strictly in them."
+        )
+
+    return {
+        "query": query,
+        "answer": greeting_text,
+        "sources": [],
+        "retrieval_method": "greeting",
+    }
+
+
 def format_chat_history_block(chat_history: Optional[List[Dict[str, Any]]], max_turns: int = 8) -> str:
     """Formats recent conversation turns into a context block."""
     if not chat_history:
@@ -438,6 +494,11 @@ def generate_rag_response(
     if is_meta_conversational_query(query):
         generation_logger.info(f"Meta-conversational query detected: '{query}'. Answering directly from session history.")
         return handle_meta_conversational_query(query, chat_history=chat_history, llm=llm)
+
+    # Step 0b: Conversational Greeting Interception (Bypasses document retrieval for simple greetings)
+    if is_greeting_query(query):
+        generation_logger.info(f"Greeting query detected: '{query}'. Answering with conversational welcome.")
+        return handle_greeting_query(query, project_id=project_id)
 
     # Step 1: Query Rewriting for follow-up questions
     search_query = rewrite_conversational_query(query, chat_history=chat_history, llm=llm)

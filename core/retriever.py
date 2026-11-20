@@ -12,6 +12,18 @@ from core.config import (
 from core.vectorstore import dense_similarity_search, get_all_chunks
 from core.logger import retrieval_logger
 
+try:
+    import tiktoken
+    _enc = tiktoken.get_encoding("cl100k_base")
+    def count_tokens(text: str) -> int:
+        if not text:
+            return 0
+        return len(_enc.encode(text, disallowed_special=()))
+except Exception:
+    def count_tokens(text: str) -> int:
+        return max(1, len((text or "").split())) if text else 0
+
+
 BM25_STOPWORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
     "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but",
@@ -71,7 +83,20 @@ class HybridRetriever:
             retrieval_logger.warning(f"Dense search skipped for Project '{self.project_id}': no chunks indexed.")
             return []
         try:
-            return dense_similarity_search(self.project_id, query, k=k, filename_filter=filename_filter)
+            hits = dense_similarity_search(self.project_id, query, k=k, filename_filter=filename_filter)
+            q_tokens = count_tokens(query)
+            retrieval_logger.info(
+                f"Dense search: count={len(hits)} chunks | query_tokensize={q_tokens} | filter={filename_filter or 'none'}"
+            )
+            for idx, h in enumerate(hits, 1):
+                raw = (h.get("content") or "").replace("\n", " ").strip()
+                preview_100 = raw[:100]
+                chunk_tokens = count_tokens(h.get("content") or "")
+                retrieval_logger.info(
+                    f"  [Dense Chunk #{idx}] id={h.get('chunk_id')} | sim={h.get('similarity', 0.0):.4f} | "
+                    f"tokensize={chunk_tokens} | first_100_chars: \"{preview_100}\""
+                )
+            return hits
         except Exception as e:
             retrieval_logger.error(f"Dense search failed: {e}", exc_info=True)
             return []
@@ -117,7 +142,19 @@ class HybridRetriever:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         top_score = f"{sparse_docs[0]['score']:.4f}" if sparse_docs else "0.0"
-        retrieval_logger.info(f"BM25 search: retrieved {len(sparse_docs)} chunks in {elapsed_ms:.1f}ms | Tokens: {query_tokens[:5]} | Filter: {filename_filter or 'none'} | Top score: {top_score}")
+        q_tokens = count_tokens(query)
+        retrieval_logger.info(
+            f"BM25 search: count={len(sparse_docs)} chunks in {elapsed_ms:.1f}ms | query_tokensize={q_tokens} | "
+            f"tokens={query_tokens[:5]} | filter={filename_filter or 'none'} | top_score={top_score}"
+        )
+        for idx, doc in enumerate(sparse_docs, 1):
+            raw = (doc.get("content") or "").replace("\n", " ").strip()
+            preview_100 = raw[:100]
+            chunk_tokens = count_tokens(doc.get("content") or "")
+            retrieval_logger.info(
+                f"  [BM25 Chunk #{idx}] id={doc.get('chunk_id')} | score={doc['score']:.4f} | "
+                f"tokensize={chunk_tokens} | first_100_chars: \"{preview_100}\""
+            )
         return sparse_docs
 
     def _reciprocal_rank_fusion(
@@ -160,7 +197,16 @@ class HybridRetriever:
             fused.append(item)
 
         top_rrf = f"{fused[0]['rrf_score']:.5f}" if fused else "0.0"
-        retrieval_logger.info(f"RRF fusion: merged {len(dense_results)} dense + {len(sparse_results)} sparse into {len(fused)} candidates ({overlap_count} overlapping boosts) | Top RRF: {top_rrf}")
+        retrieval_logger.info(
+            f"RRF fusion: merged {len(dense_results)} dense + {len(sparse_results)} sparse into {len(fused)} candidates ({overlap_count} overlapping boosts) | top_score={top_rrf}"
+        )
+        for rank, doc in enumerate(fused[:10], 1):
+            raw = (doc.get("content") or "").replace("\n", " ").strip()
+            preview_100 = raw[:100]
+            chunk_tokens = count_tokens(doc.get("content") or "")
+            retrieval_logger.info(
+                f"  [RRF Candidate #{rank}] rrf_score={doc.get('rrf_score', 0.0):.5f} | tokensize={chunk_tokens} | first_100_chars: \"{preview_100}\""
+            )
         return fused
 
     def _rerank_with_cohere(
@@ -176,7 +222,16 @@ class HybridRetriever:
         api_key = os.getenv("COHERE_API_KEY") or COHERE_API_KEY
         if not api_key or "your-cohere" in api_key or not candidates:
             retrieval_logger.info("Cohere rerank bypassed (no API key configured or empty candidates); using RRF order.")
-            return candidates[:top_n]
+            reranked_fallback = candidates[:top_n]
+            for rank, doc in enumerate(reranked_fallback, 1):
+                raw = (doc.get("content") or doc.get("summary") or "").replace("\n", " ").strip()
+                preview_100 = raw[:100]
+                chunk_tokens = count_tokens(doc.get("content") or "")
+                score = doc.get("rrf_score", 0.0)
+                retrieval_logger.info(
+                    f"  [Rerank Score #{rank} (RRF)] score={score:.5f} | tokensize={chunk_tokens} | first_100_chars: \"{preview_100}\""
+                )
+            return reranked_fallback
 
         t0 = time.perf_counter()
         try:
@@ -205,11 +260,30 @@ class HybridRetriever:
 
             elapsed_ms = (time.perf_counter() - t0) * 1000
             top_rel = f"{reranked[0]['rerank_score']:.4f}" if reranked else "0.0"
-            retrieval_logger.info(f"Cohere rerank v3.5 completed in {elapsed_ms:.1f}ms: {len(candidates)} candidates -> {len(reranked)} top chunks | Top relevance: {top_rel}")
+            retrieval_logger.info(
+                f"Cohere rerank v3.5 completed in {elapsed_ms:.1f}ms: count={len(reranked)} (from {len(candidates)} candidates) | top_score={top_rel}"
+            )
+            for rank, doc in enumerate(reranked, 1):
+                raw = (doc.get("content") or doc.get("summary") or "").replace("\n", " ").strip()
+                preview_100 = raw[:100]
+                chunk_tokens = count_tokens(doc.get("content") or "")
+                score = doc.get("rerank_score", 0.0)
+                retrieval_logger.info(
+                    f"  [Rerank Score #{rank}] score={score:.4f} | tokensize={chunk_tokens} | first_100_chars: \"{preview_100}\""
+                )
             return reranked
         except Exception as e:
             retrieval_logger.warning(f"Cohere rerank failed ({e}); falling back to top {top_n} RRF candidates.")
-            return candidates[:top_n]
+            fallback_reranked = candidates[:top_n]
+            for rank, doc in enumerate(fallback_reranked, 1):
+                raw = (doc.get("content") or doc.get("summary") or "").replace("\n", " ").strip()
+                preview_100 = raw[:100]
+                chunk_tokens = count_tokens(doc.get("content") or "")
+                score = doc.get("rrf_score", 0.0)
+                retrieval_logger.info(
+                    f"  [Rerank Score #{rank} (Fallback)] score={score:.5f} | tokensize={chunk_tokens} | first_100_chars: \"{preview_100}\""
+                )
+            return fallback_reranked
 
     def retrieve(
         self,
@@ -226,8 +300,11 @@ class HybridRetriever:
         4. Neural Reranking (Cohere or RRF fallback)
         """
         t0 = time.perf_counter()
+        q_tokens = count_tokens(query)
         filter_msg = f" | Filter: '{filename_filter}'" if filename_filter else ""
-        retrieval_logger.info(f"Retrieval initiated for Project: {self.project_id}{filter_msg} | Query: '{query[:80]}...'")
+        retrieval_logger.info(
+            f"Retrieval initiated for Project: {self.project_id}{filter_msg} | query_tokensize={q_tokens} | Query: '{query[:80]}...'"
+        )
 
         dense_docs = self._dense_search(query, k=top_k, filename_filter=filename_filter)
         sparse_docs = self._sparse_search(query, k=top_k, filename_filter=filename_filter)
@@ -264,5 +341,20 @@ class HybridRetriever:
                         final_results.insert(0, p1)
 
         total_ms = (time.perf_counter() - t0) * 1000
-        retrieval_logger.info(f"✔ Retrieval pipeline completed in {total_ms:.1f}ms: returned {len(final_results)} chunks to LLM.")
+        total_chunk_tokens = sum(count_tokens(c.get("content") or "") for c in final_results)
+        retrieval_logger.info(
+            f"✔ Retrieval pipeline completed in {total_ms:.1f}ms | query_tokensize={q_tokens} tokens | "
+            f"retrieved_count={len(final_results)} chunks | total_chunk_tokensize={total_chunk_tokens} tokens"
+        )
+        for idx, c in enumerate(final_results, 1):
+            raw = (c.get("content") or "").replace("\n", " ").strip()
+            preview_100 = raw[:100]
+            chunk_tokens = count_tokens(c.get("content") or "")
+            score = c.get("rerank_score") if c.get("rerank_score") is not None else c.get("rrf_score", c.get("score", 0.0))
+            score_type = "rerank" if c.get("rerank_score") is not None else ("rrf" if c.get("rrf_score") is not None else "score")
+            retrieval_logger.info(
+                f"  [Retrieved Chunk #{idx}] id={c.get('chunk_id')} | doc={c.get('filename')} (p.{c.get('page_number', 1)}) | "
+                f"{score_type}_score={score:.4f} | tokensize={chunk_tokens} | first_100_chars: \"{preview_100}\""
+            )
         return final_results
+

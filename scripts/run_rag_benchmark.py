@@ -1,16 +1,14 @@
-import os
 import sys
 import json
 import math
 import re
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.rag_chain import generate_rag_response
-from core.retriever import HybridRetriever
 
 PROJECT_ID = "0fa55d40-2859-494b-8537-fd423ded528b"
 

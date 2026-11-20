@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from core.config import PROJECTS_DIR
 from core.logger import app_logger
 from db.session import is_db_connected, get_db_session
-from db.models import Project, Conversation
+from db.models import Project
 
 
 def get_project_file_path(project_id: str) -> Path:

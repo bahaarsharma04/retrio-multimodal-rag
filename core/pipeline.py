@@ -123,33 +123,17 @@ def _atomic_json(path: Path, value: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def run_ingestion_pipeline(
+def _execute_pipeline_stages(
     project_id: str,
     file_path: Path,
-    progress_callback: Optional[Callable[[str, int, int], None]] = None,
-    restart: bool = False,
+    filename: str,
+    file_size_kb: float,
+    document_hash: str,
+    source_key: str,
+    restart: bool,
+    progress_callback: Optional[Callable[[str, int, int], None]],
+    user_id: Optional[str],
 ) -> Dict[str, Any]:
-    """
-    Executes the complete 5-stage ingestion pipeline with checkpoint recovery:
-    1. Partitioning (Text, Tables, Images, Titles)
-    2. Chunking (Semantic chunking by title)
-    3. Summarisation (AI summaries for tables/images)
-    4. Vectorization & Storage (OpenAI Embeddings + PostgreSQL pgvector)
-    5. View Chunks (Formatted chunk list with metadata)
-
-    If interrupted, loads from the last checkpoint to avoid re-running expensive steps.
-    """
-    file_path = Path(file_path)
-    filename = file_path.name
-    if not file_path.is_file():
-        raise FileNotFoundError(file_path)
-    file_size_kb = round(file_path.stat().st_size / 1024, 1) if file_path.exists() else 0
-    document_hash = sha256_file(file_path)
-    # A document filename is the stable identity within a project.
-    source_key = hashlib.sha256(f"{project_id}:{filename}".encode()).hexdigest()
-
-    ingest_logger.info(f"Initiating ingestion pipeline for '{filename}' ({file_size_kb} KB) | Project: {project_id}")
-
     previous = load_document_pipeline_data(project_id, filename)
     if not restart and previous and previous.get("status") == "completed":
         old_ids = previous.get("stages", {}).get("vectorization", {}).get("stats", {}).get("chunk_ids", [])
@@ -161,6 +145,14 @@ def run_ingestion_pipeline(
             result["skipped"] = True
             result["stages"]["vectorization"]["stats"] = dict(previous["stages"]["vectorization"]["stats"])
             result["stages"]["vectorization"]["stats"]["new_vectors_added"] = 0
+            update_document_status_in_db(
+                project_id=project_id,
+                filename=filename,
+                file_path=file_path,
+                document_hash=document_hash,
+                status="completed",
+                user_id=user_id,
+            )
             return result
 
     if restart:
@@ -294,9 +286,174 @@ def run_ingestion_pipeline(
         file_path=file_path,
         document_hash=document_hash,
         chunks=all_chunks_for_file,
+        user_id=user_id,
+    )
+
+    update_document_status_in_db(
+        project_id=project_id,
+        filename=filename,
+        file_path=file_path,
+        document_hash=document_hash,
+        status="completed",
+        user_id=user_id,
+        total_chunks=len(all_chunks_for_file),
     )
 
     return pipeline_result
+
+
+def run_ingestion_pipeline(
+    project_id: str,
+    file_path: Path,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    restart: bool = False,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Executes the complete 5-stage ingestion pipeline with checkpoint recovery:
+    1. Partitioning (Text, Tables, Images, Titles)
+    2. Chunking (Semantic chunking by title)
+    3. Summarisation (AI summaries for tables/images)
+    4. Vectorization & Storage (OpenAI Embeddings + PostgreSQL pgvector)
+    5. View Chunks (Formatted chunk list with metadata)
+
+    If interrupted, loads from the last checkpoint to avoid re-running expensive steps.
+    """
+    file_path = Path(file_path)
+    filename = file_path.name
+    if not file_path.is_file():
+        raise FileNotFoundError(file_path)
+    file_size_kb = round(file_path.stat().st_size / 1024, 1) if file_path.exists() else 0
+    document_hash = sha256_file(file_path)
+    # A document filename is the stable identity within a project.
+    source_key = hashlib.sha256(f"{project_id}:{filename}".encode()).hexdigest()
+
+    ingest_logger.info(f"Initiating ingestion pipeline for '{filename}' ({file_size_kb} KB) | Project: {project_id}")
+
+    # Mark document as processing in PostgreSQL
+    update_document_status_in_db(
+        project_id=project_id,
+        filename=filename,
+        file_path=file_path,
+        document_hash=document_hash,
+        status="processing",
+        user_id=user_id,
+    )
+
+    try:
+        return _execute_pipeline_stages(
+            project_id=project_id,
+            file_path=file_path,
+            filename=filename,
+            file_size_kb=file_size_kb,
+            document_hash=document_hash,
+            source_key=source_key,
+            restart=restart,
+            progress_callback=progress_callback,
+            user_id=user_id,
+        )
+    except Exception as e:
+        ingest_logger.error(f"Ingestion pipeline failed for '{filename}': {e}", exc_info=True)
+        update_document_status_in_db(
+            project_id=project_id,
+            filename=filename,
+            file_path=file_path,
+            document_hash=document_hash,
+            status="failed",
+            error_message=str(e),
+            user_id=user_id,
+        )
+        raise
+
+
+def update_document_status_in_db(
+    project_id: str,
+    filename: str,
+    file_path: Optional[Path] = None,
+    document_hash: Optional[str] = None,
+    status: str = "processing",
+    error_message: Optional[str] = None,
+    user_id: Optional[str] = None,
+    total_chunks: int = 0,
+) -> Optional[str]:
+    """Updates or creates a Document record and PipelineRun in PostgreSQL."""
+    try:
+        from db.session import is_db_connected, get_db_session
+        if not is_db_connected():
+            return None
+        from db.models import Document, Project, PipelineRun
+        from sqlalchemy import func
+        import uuid
+
+        with get_db_session() as s:
+            if not user_id:
+                proj = s.query(Project).filter(Project.id == project_id).first()
+                if proj and proj.owner_id:
+                    user_id = proj.owner_id
+
+            doc = s.query(Document).filter(
+                Document.project_id == project_id,
+                Document.filename == filename
+            ).first()
+
+            if not doc:
+                doc = Document(
+                    id=str(uuid.uuid4()),
+                    project_id=project_id,
+                    user_id=user_id,
+                    filename=filename,
+                    file_path=str(file_path) if file_path else "",
+                    file_hash=document_hash or "",
+                    ingestion_status=status,
+                )
+                s.add(doc)
+                s.flush()
+            else:
+                if document_hash:
+                    doc.file_hash = document_hash
+                if file_path:
+                    doc.file_path = str(file_path)
+                doc.ingestion_status = status
+                if user_id:
+                    doc.user_id = user_id
+
+            # Update or create PipelineRun
+            run = s.query(PipelineRun).filter(
+                PipelineRun.document_id == doc.id
+            ).order_by(PipelineRun.started_at.desc()).first()
+
+            if status == "processing":
+                if not run or run.status != "processing":
+                    run = PipelineRun(
+                        id=str(uuid.uuid4()),
+                        document_id=doc.id,
+                        status="processing",
+                    )
+                    s.add(run)
+            elif status == "completed":
+                if run and run.status == "processing":
+                    run.status = "completed"
+                    run.total_chunks = total_chunks
+                    run.finished_at = func.now()
+            elif status == "failed":
+                if run and run.status == "processing":
+                    run.status = "failed"
+                    run.error_message = error_message
+                    run.finished_at = func.now()
+                else:
+                    s.add(PipelineRun(
+                        id=str(uuid.uuid4()),
+                        document_id=doc.id,
+                        status="failed",
+                        error_message=error_message,
+                        finished_at=func.now(),
+                    ))
+
+            s.commit()
+            return doc.id
+    except Exception as e:
+        ingest_logger.warning(f"Failed to update document status in DB for '{filename}': {e}")
+        return None
 
 
 def sync_document_chunks_to_db(

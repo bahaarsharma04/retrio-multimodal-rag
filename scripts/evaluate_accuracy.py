@@ -23,7 +23,6 @@ Usage:
     python scripts/evaluate_accuracy.py --compare --threshold 0.05
 """
 
-import os
 import sys
 import json
 import math
@@ -37,10 +36,9 @@ from typing import List, Dict, Any, Optional, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.projects import list_projects, get_project
+from core.projects import list_projects
 from core.rag_chain import generate_rag_response
 from core.vectorstore import get_live_vector_count
-from core.logger import app_logger
 
 BENCHMARK_DIR = PROJECT_ROOT / "data" / "benchmarks"
 DEFAULT_OUTPUT_PATH = BENCHMARK_DIR / "latest_accuracy.json"

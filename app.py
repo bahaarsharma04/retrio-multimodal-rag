@@ -7,7 +7,6 @@ from core.pipeline import (
     run_ingestion_pipeline,
     load_document_pipeline_data,
     get_project_docs_dir,
-    get_document_record_path,
     get_interrupted_documents,
     delete_source_document,
     reconcile_project_documents,

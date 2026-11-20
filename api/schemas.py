@@ -105,3 +105,25 @@ class HealthResponse(BaseModel):
     status: str
     database_connected: bool
     version: str = "1.0.0"
+
+
+# ----------------- Document & Ingestion Schemas -----------------
+
+class DocumentUploadAsyncResponse(BaseModel):
+    message: str
+    filename: str
+    project_id: str
+    status: str = "processing"
+    document_id: Optional[str] = None
+
+
+class DocumentStatusResponse(BaseModel):
+    filename: str
+    project_id: str
+    status: str
+    total_chunks: int = 0
+    duration_seconds: float = 0.0
+    error_message: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    stages: List[Dict[str, Any]] = []

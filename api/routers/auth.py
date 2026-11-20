@@ -1,5 +1,4 @@
-from typing import List
-from fastapi import APIRouter, HTTPException, Request, Depends, status, Path
+from fastapi import APIRouter, HTTPException, Request, Depends, status
 from api.schemas import (
     UserRegisterRequest,
     UserLoginRequest,

@@ -1,9 +1,7 @@
-import os
 import sys
 import json
 import hashlib
 from pathlib import Path
-from datetime import datetime
 
 # Set project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -13,8 +11,6 @@ from db.session import get_db_session, is_db_connected, init_db
 from db.models import (
     Project,
     Document,
-    PipelineRun,
-    PipelineStage,
     DocumentChunk,
     Conversation,
     Message,
@@ -92,25 +88,8 @@ def migrate_all():
                 print(f"-> Project migrated: {db_proj.name} ({project_id})")
             session.flush()
 
-            # 2. Extract ChromaDB vectors if available
+            # 2. Extract cached vectors if available
             chroma_vectors = {}
-            chroma_dir = pdir / "chroma"
-            if chroma_dir.exists():
-                try:
-                    import chromadb
-                    chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
-                    cols = chroma_client.list_collections()
-                    for col in cols:
-                        col_data = col.get(include=["embeddings"])
-                        ids = col_data.get("ids", [])
-                        embeddings = col_data.get("embeddings", [])
-                        for cid, emb in zip(ids, embeddings):
-                            if emb is not None:
-                                chroma_vectors[cid] = emb
-                    if chroma_vectors:
-                        print(f"   Loaded {len(chroma_vectors)} pre-computed embeddings from ChromaDB")
-                except Exception as e:
-                    print(f"   Notice: Could not read Chroma vectors ({e}); will migrate chunks without vectors")
 
             # 3. Migrate Documents & Pipeline Data
             docs_dir = pdir / "documents"
