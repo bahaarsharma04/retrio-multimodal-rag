@@ -73,8 +73,8 @@ Before chunking, raw files are classified and normalized into canonical structur
 
 ### 3. Unified Single Database: PostgreSQL (`pgvector`)
 * **Single Database Architecture:** Unifies relational metadata (`projects`, `documents`, `conversations`, `messages`) and dense vectors (`document_chunks` with 1536-dimensional native `vector` column) inside PostgreSQL.
-* **Native Cosine Similarity (`<=>`):** Dense vector distance is computed directly in PostgreSQL using `pgvector` HNSW/IVFFlat indexes, eliminating separate external vector services.
-* **Transparent Offline Resilience:** Automatic local fallback if Docker/PostgreSQL is momentarily paused, ensuring no data loss.
+* **Native Cosine Similarity (`<=>`):** Dense vector distance is computed directly in PostgreSQL using `pgvector` HNSW/IVFFlat indexes, eliminating separate external vector services or local ChromaDB databases.
+* **Strict Fail-Fast Single Source of Truth:** Direct connection to PostgreSQL is required. No fallbacks or duplicate vector silos.
 
 ### 4. Two-Stage Hybrid Retrieval & Neural Reranking
 * **Dense Semantic Search:** OpenAI `text-embedding-3-small` vectors searched via native PostgreSQL `pgvector` cosine similarity (`<=>`).
@@ -108,6 +108,9 @@ Rag application/
 │   ├── session.py          # PostgreSQL session management & extension bootstrap
 │   └── alembic/            # Database schema migration scripts
 ├── scripts/
+│   ├── chunk_document.py               # Standalone layout & semantic chunking CLI
+│   ├── embed_document.py               # Standalone embedding & pgvector indexing CLI
+│   ├── retrieve_context.py             # Standalone hybrid/dense/BM25 retrieval & rerank CLI
 │   ├── test_db.py                      # PostgreSQL & pgvector verification suite
 │   ├── verify_formats_and_metadata.py  # End-to-end format & metadata test suite
 │   └── migrate_json_to_postgres.py     # Data migration from local JSON to PostgreSQL
@@ -173,7 +176,27 @@ Run security checks and model accuracy evaluations after every code change:
 .venv\Scripts\python.exe scripts\verify_formats_and_metadata.py
 ```
 
-### 5. Launch Application
+### 5. Standalone Executable CLI Utilities
+You can independently run the ingestion stages (chunking, embedding, retrieval) from the command line:
+
+```powershell
+# 1. Chunking: Parse and chunk any document layout
+.venv\Scripts\python.exe scripts\chunk_document.py "path/to/document.pdf" --preview
+# Optional: save to JSON for decoupled pipelines
+.venv\Scripts\python.exe scripts\chunk_document.py "path/to/document.pdf" --output-json chunks.json
+
+# 2. Embedding: Generate embeddings & index into PostgreSQL pgvector
+# Directly from file:
+.venv\Scripts\python.exe scripts\embed_document.py --file "path/to/document.pdf" --project-id <project_id>
+# Or from pre-generated chunks JSON:
+.venv\Scripts\python.exe scripts\embed_document.py --chunks-json chunks.json --project-id <project_id>
+
+# 3. Retrieval: Query indexed vectors with hybrid search (pgvector + BM25 + Cohere rerank)
+.venv\Scripts\python.exe scripts\retrieve_context.py --project-id <project_id> --query "your question"
+# Options: --top-k 10 --top-n 3 --mode hybrid|dense-only|bm25-only --output-json results.json
+```
+
+### 6. Launch Application
 ```powershell
 streamlit run app.py
 ```

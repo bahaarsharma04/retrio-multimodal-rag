@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/v1", tags=["Conversations & RAG Chat"])
     "/projects/{project_id}/chat",
     response_model=ChatResponse,
     summary="Ask a question grounded in project documents (ownership verified)",
-    description="Executes hybrid retrieval (BM25 + ChromaDB + Cohere) and multi-turn generation. Rate limited to 15 queries per minute.",
+    description="Executes hybrid retrieval (BM25 + PostgreSQL pgvector + Cohere) and multi-turn generation. Rate limited to 15 queries per minute.",
 )
 @limiter.limit("15/minute")
 def chat_with_project(

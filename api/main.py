@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Retrio - Multi-Modal Hybrid RAG API",
-    description="Production-grade Retrieval-Augmented Generation API with Unstructured layout parsing, BM25 + ChromaDB Hybrid Search, Cohere Reranking, and PostgreSQL conversation memory.",
+    description="Production-grade Retrieval-Augmented Generation API with Unstructured layout parsing, BM25 + PostgreSQL pgvector Hybrid Search, Cohere Reranking, and PostgreSQL conversation memory.",
     version="1.0.0",
     lifespan=lifespan,
     docs_url="/docs",

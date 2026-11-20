@@ -77,7 +77,6 @@ def create_project(name: str, description: str = "", owner_id: Optional[str] = N
     pdir = PROJECTS_DIR / project_id
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "documents").mkdir(exist_ok=True)
-    (pdir / "chroma").mkdir(exist_ok=True)
 
     project_data = {
         "id": project_id,
@@ -156,19 +155,7 @@ def delete_project(project_id: str, owner_id: Optional[str] = None) -> bool:
 
     project_name = project_meta.get("name", "Unknown")
 
-    # 1. Delete ChromaDB collection and vectors
-    try:
-        from core.vectorstore import get_project_vectorstore
-        store = get_project_vectorstore(project_id)
-        collection_name = f"col_{project_id}"
-        try:
-            store._client.delete_collection(name=collection_name)
-        except Exception:
-            pass
-    except Exception as e:
-        app_logger.warning(f"Failed to delete ChromaDB collection for project {project_id}: {e}")
-
-    # 2. Delete PostgreSQL records if DB is connected
+    # 1. Delete PostgreSQL records if DB is connected (cascades to documents, chunks, conversations)
     if is_db_connected():
         try:
             with get_db_session() as session:
@@ -177,7 +164,7 @@ def delete_project(project_id: str, owner_id: Optional[str] = None) -> bool:
         except Exception as e:
             app_logger.warning(f"Failed to delete PostgreSQL records for project {project_id}: {e}")
 
-    # 3. Clean up files on disk
+    # 2. Clean up files on disk
     if pdir.exists():
         pfile = pdir / "project.json"
         if pfile.exists():

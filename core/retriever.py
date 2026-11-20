@@ -220,7 +220,7 @@ class HybridRetriever:
     ) -> List[Dict[str, Any]]:
         """
         End-to-end Hybrid Retrieval:
-        1. Dense Vector Search (Chroma)
+        1. Dense Vector Search (PostgreSQL pgvector)
         2. Sparse Keyword Search (BM25)
         3. Reciprocal Rank Fusion (RRF)
         4. Neural Reranking (Cohere or RRF fallback)

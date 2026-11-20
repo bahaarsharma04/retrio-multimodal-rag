@@ -121,7 +121,7 @@ def get_pipeline_telemetry(
     return data
 
 
-@router.delete("/{filename}", summary="Delete document and remove its embeddings from ChromaDB (ownership verified)")
+@router.delete("/{filename}", summary="Delete document and remove its embeddings from PostgreSQL (ownership verified)")
 @limiter.limit("15/minute")
 def delete_document(
     request: Request,

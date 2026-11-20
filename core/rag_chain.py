@@ -422,7 +422,7 @@ def generate_rag_response(
     Executes the full RAG pipeline with multi-turn conversation memory:
     0. Meta-Conversational Query Interception (Bypasses document retrieval for session recaps)
     1. Conversational Query Rewriting (Context Resolution)
-    2. Hybrid Retrieval (BM25 + ChromaDB + RRF + Cohere) with Multi-Doc Support
+    2. Hybrid Retrieval (BM25 + PostgreSQL pgvector + RRF + Cohere) with Multi-Doc Support
     3. Context & Conversation History Formatting
     4. Grounded LLM Response Generation (gpt-4o-mini)
     """
@@ -473,7 +473,7 @@ def generate_rag_response(
         ])
         mock_answer = (
             f"**[Offline Demo Mode - Please set OPENAI_API_KEY in .env for live generation]**\n\n"
-            f"Successfully retrieved **{len(retrieved_sources)} relevant chunks** via Hybrid Search (BM25 + ChromaDB):\n\n"
+            f"Successfully retrieved **{len(retrieved_sources)} relevant chunks** via Hybrid Search (BM25 + PostgreSQL pgvector):\n\n"
             f"{sources_summary}\n\n"
             f"Add your OpenAI key in `.env` to enable live LLM generation!"
         )

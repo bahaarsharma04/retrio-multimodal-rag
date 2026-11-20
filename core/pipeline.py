@@ -134,7 +134,7 @@ def run_ingestion_pipeline(
     1. Partitioning (Text, Tables, Images, Titles)
     2. Chunking (Semantic chunking by title)
     3. Summarisation (AI summaries for tables/images)
-    4. Vectorization & Storage (OpenAI Embeddings + ChromaDB)
+    4. Vectorization & Storage (OpenAI Embeddings + PostgreSQL pgvector)
     5. View Chunks (Formatted chunk list with metadata)
 
     If interrupted, loads from the last checkpoint to avoid re-running expensive steps.
@@ -408,7 +408,7 @@ def sync_document_chunks_to_db(
 
 def delete_source_document(project_id: str, filename: str) -> bool:
     """
-    Deletes vector data from PostgreSQL and ChromaDB, and removes all associated files from disk.
+    Deletes vector data from PostgreSQL (pgvector) and removes all associated files from disk.
     Ensures complete, case-insensitive purging with zero orphan remnants.
     """
     from core.vectorstore import delete_file_from_vectorstore
@@ -454,7 +454,7 @@ def delete_source_document(project_id: str, filename: str) -> bool:
 def reconcile_project_documents(project_id: str) -> Dict[str, Any]:
     """
     Ensures a single source of truth between disk and database:
-    1. Removes any ghost document records from PostgreSQL and ChromaDB if their physical file is not on disk.
+    1. Removes any ghost document records from PostgreSQL if their physical file is not on disk.
     2. Returns the synchronized list of active documents.
     """
     documents_dir = get_project_docs_dir(project_id)
