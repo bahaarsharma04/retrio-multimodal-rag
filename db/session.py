@@ -1,0 +1,107 @@
+import time
+from contextlib import contextmanager
+from typing import Generator
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, Session
+from core.config import DATABASE_URL
+from db.base import Base
+
+# Engine configuration
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args["check_same_thread"] = False
+elif "postgresql" in DATABASE_URL:
+    # 2 second connection timeout prevents UI freezes when Postgres server is unreachable
+    connect_args["connect_timeout"] = 2
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args=connect_args,
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Status cache to avoid continuous connection polling when DB is offline
+_DB_STATUS_CACHE = {"status": None, "last_checked": 0.0}
+_CACHE_TTL_SECONDS = 15.0
+
+
+def init_db() -> bool:
+    """Ensures database tables and necessary PostgreSQL extensions are created."""
+    try:
+        from db import models  # noqa: F401
+        if "postgresql" in DATABASE_URL:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'))
+                    conn.execute(text('CREATE EXTENSION IF NOT EXISTS "pgcrypto";'))
+                    try:
+                        conn.execute(text('CREATE EXTENSION IF NOT EXISTS "vector";'))
+                    except Exception as ext_err:
+                        print(f"Notice: pgvector extension not present on Postgres server: {ext_err}")
+                    conn.commit()
+            except Exception as e:
+                print(f"Notice: Extension initialization check skipped: {e}")
+
+        Base.metadata.create_all(bind=engine)
+
+        if "postgresql" in DATABASE_URL:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS title VARCHAR(255) DEFAULT \'General\';'))
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS part_index INTEGER DEFAULT 1;'))
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS total_parts INTEGER DEFAULT 1;'))
+                    # User ownership columns
+                    conn.execute(text('ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.execute(text('ALTER TABLE documents ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.execute(text('ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    conn.commit()
+            except Exception as e:
+                print(f"Notice: Column migration note: {e}")
+        return True
+    except Exception as e:
+        print(f"Warning: Database init failed: {e}")
+        return False
+
+
+def is_db_connected(force_check: bool = False) -> bool:
+    """
+    Probes whether PostgreSQL or the configured database is reachable.
+    Caches result for 15s to keep Streamlit UI fast when offline.
+    """
+    now = time.time()
+    if not force_check and _DB_STATUS_CACHE["status"] is not None:
+        if now - _DB_STATUS_CACHE["last_checked"] < _CACHE_TTL_SECONDS:
+            return _DB_STATUS_CACHE["status"]
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            _DB_STATUS_CACHE["status"] = True
+            _DB_STATUS_CACHE["last_checked"] = now
+            return True
+    except Exception:
+        _DB_STATUS_CACHE["status"] = False
+        _DB_STATUS_CACHE["last_checked"] = now
+        return False
+
+
+def get_db() -> Generator[Session, None, None]:
+    """FastAPI Dependency for database sessions."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@contextmanager
+def get_db_session() -> Generator[Session, None, None]:
+    """Context manager for non-FastAPI standalone operations."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

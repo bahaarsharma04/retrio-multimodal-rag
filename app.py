@@ -1,25 +1,26 @@
-import os
+import re
 import uuid
-from pathlib import Path
 import streamlit as st
 
-from core.config import PROJECTS_DIR, OPENAI_API_KEY
-from core.projects import list_projects, create_project, get_project
+from core.projects import list_projects, create_project, get_project, delete_project
 from core.pipeline import (
     run_ingestion_pipeline,
     load_document_pipeline_data,
     get_project_docs_dir,
+    get_interrupted_documents,
     delete_source_document,
+    reconcile_project_documents,
 )
 from core.rag_chain import generate_rag_response
 from core.chat_manager import (
     list_chats,
-    get_chat,
     save_chat,
     generate_chat_title,
     rename_chat,
     delete_chat,
 )
+from core.users import authenticate_user, create_user
+from core.security import create_access_token
 
 # ----------------- Streamlit Page Configuration -----------------
 st.set_page_config(
@@ -32,7 +33,12 @@ st.set_page_config(
 # ----------------- Sleek Dark Theme Custom CSS -----------------
 st.markdown("""
 <style>
-    /* 1. Eliminate Streamlit top empty gap */
+    /* 1. Eliminate Streamlit top empty gap and lock root viewport */
+    html, body, .stApp, [data-testid="stAppViewContainer"], section.main, .main, [data-testid="stMain"] {
+        overflow: hidden !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+    }
     .block-container {
         padding-top: 1rem !important;
         padding-bottom: 0rem !important;
@@ -55,7 +61,25 @@ st.markdown("""
         color: #e6edf3;
     }
 
-    /* 3. Retrio Logo */
+    /* 3. Eliminate Streamlit Stale-Element Dimming / Screen Darkening on Reruns */
+    [data-stale="true"],
+    [data-stale="true"] *,
+    div[data-stale="true"],
+    div[data-stale="true"] > *,
+    [data-testid="column"][data-stale="true"],
+    [data-testid="column"] [data-stale="true"],
+    [data-testid="stVerticalBlock"] [data-stale="true"],
+    [data-testid="stVerticalBlock"] > div[data-stale="true"],
+    .stElementContainer[data-stale="true"],
+    [data-testid="stAppViewContainer"] [data-stale="true"],
+    [data-testid="stAppViewBlockContainer"] [data-stale="true"],
+    [data-testid="stChatMessageContainer"][data-stale="true"] {
+        opacity: 1 !important;
+        filter: none !important;
+        transition: none !important;
+    }
+
+    /* 4. Retrio Logo */
     .retrio-logo {
         font-size: 26px;
         font-weight: 800;
@@ -67,12 +91,21 @@ st.markdown("""
         display: inline-block;
     }
 
-    /* 4. Column constraints to prevent whole-page scrolling */
-    [data-testid="column"]:nth-child(1),
-    [data-testid="column"]:nth-child(3) {
-        max-height: calc(100vh - 2.5rem);
-        overflow-y: auto;
-        padding-right: 4px;
+    /* 4. Streamlit native container scrollbars styling */
+    [data-testid="stVerticalBlockBorderWrapper"] ::-webkit-scrollbar,
+    ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #30363d;
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #58a6ff;
     }
 
     /* 5. Custom Card Styling */
@@ -157,11 +190,14 @@ st.markdown("""
 
 
 # ----------------- Session State Initialization -----------------
-all_projects = list_projects()
-default_pid = all_projects[0]["id"] if all_projects else None
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
 
-if "active_project_id" not in st.session_state or not st.session_state.active_project_id:
-    st.session_state.active_project_id = default_pid
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = None
+
+if "active_project_id" not in st.session_state:
+    st.session_state.active_project_id = None
 
 if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = str(uuid.uuid4())
@@ -185,29 +221,40 @@ if "selected_chunk_id" not in st.session_state:
 @st.dialog("📂 Choose Project")
 def choose_project_dialog():
     st.caption("Select an existing knowledge base workspace")
-    projects = list_projects()
+    user_id = st.session_state.current_user["id"] if st.session_state.get("current_user") else None
+
+    projects = list_projects(owner_id=user_id)
     if not projects:
-        st.info("No projects found. Create one first!")
+        st.info("No projects found.")
         if st.button("Close"):
             st.rerun()
         return
 
     search = st.text_input("🔍 Search projects...", placeholder="Filter by name...")
-    filtered = [p for p in projects if search.lower() in p.get("name", "").lower()] if search else projects
+    if search:
+        s_low = search.lower()
+        filtered = [
+            p for p in projects
+            if s_low in p.get("name", "").lower()
+            or s_low in (p.get("description") or "").lower()
+        ]
+    else:
+        filtered = projects
 
     for p in filtered:
-        is_current = (p.get("id") == st.session_state.active_project_id)
-        col_info, col_act = st.columns([7, 3])
+        p_id = p.get("id")
+        is_current = (p_id == st.session_state.active_project_id)
+        col_info, col_act, col_del = st.columns([6, 2.5, 1.5])
         with col_info:
             st.markdown(f"**{p.get('name')}**")
-            st.caption(f"{p.get('created_at')} • {p.get('description', '')[:50]}")
+            st.caption(f"{p.get('created_at')} • {p.get('description', '')[:35]}")
         with col_act:
             if is_current:
-                st.button("Active", disabled=True, key=f"active_{p.get('id')}", use_container_width=True)
+                st.button("Active", disabled=True, key=f"active_{p_id}", use_container_width=True)
             else:
-                if st.button("Select", key=f"sel_{p.get('id')}", use_container_width=True):
-                    st.session_state.active_project_id = p.get("id")
-                    chats = list_chats(p.get("id"))
+                if st.button("Select", key=f"sel_{p_id}", use_container_width=True):
+                    st.session_state.active_project_id = p_id
+                    chats = list_chats(p_id, user_id=user_id)
                     if chats:
                         first_chat = chats[0]
                         st.session_state.active_chat_id = first_chat["chat_id"]
@@ -219,6 +266,30 @@ def choose_project_dialog():
                         st.session_state.messages = []
                     st.session_state.inspecting_document = None
                     st.rerun()
+        with col_del:
+            if st.button("🗑️", key=f"del_{p_id}", help=f"Delete project '{p.get('name')}'", use_container_width=True):
+                delete_project(p_id, owner_id=user_id)
+                remaining = [proj for proj in list_projects(owner_id=user_id) if proj.get("id") != p_id]
+                if st.session_state.active_project_id == p_id:
+                    if remaining:
+                        new_active = remaining[0]["id"]
+                        st.session_state.active_project_id = new_active
+                        chats = list_chats(new_active, user_id=user_id)
+                        if chats:
+                            st.session_state.active_chat_id = chats[0]["chat_id"]
+                            st.session_state.current_chat_title = chats[0]["title"]
+                            st.session_state.messages = chats[0].get("messages", [])
+                        else:
+                            st.session_state.active_chat_id = str(uuid.uuid4())
+                            st.session_state.current_chat_title = "New Chat"
+                            st.session_state.messages = []
+                    else:
+                        st.session_state.active_project_id = None
+                        st.session_state.active_chat_id = str(uuid.uuid4())
+                        st.session_state.current_chat_title = "New Chat"
+                        st.session_state.messages = []
+                    st.session_state.inspecting_document = None
+                st.rerun()
 
 
 @st.dialog("✨ Create New Project")
@@ -226,12 +297,13 @@ def new_project_dialog():
     st.caption("Start a new knowledge base project")
     p_name = st.text_input("Project Name *", placeholder="e.g., Research Analysis, GenAI Team...")
     p_desc = st.text_area("Description (optional)", placeholder="What will this project be about?")
+    user_id = st.session_state.current_user["id"] if st.session_state.get("current_user") else None
 
     col_create, col_cancel = st.columns([1, 1])
     with col_create:
         if st.button("Create Project", type="primary", use_container_width=True):
             if p_name.strip():
-                new_proj = create_project(p_name.strip(), p_desc.strip())
+                new_proj = create_project(p_name.strip(), p_desc.strip(), owner_id=user_id)
                 st.session_state.active_project_id = new_proj["id"]
                 st.session_state.active_chat_id = str(uuid.uuid4())
                 st.session_state.current_chat_title = "New Chat"
@@ -246,24 +318,33 @@ def new_project_dialog():
 
 
 # ====================================================================
-# SCREEN 2: PIPELINE INSPECTOR (KEPT 100% UNTOUCHED)
+# SCREEN 2: PIPELINE INSPECTOR 
 # ====================================================================
 def render_pipeline_inspector(project_id: str, filename: str):
     # Lock outer window so tabs and header stay fixed on screen
-    st.markdown("""
+    st.markdown("""  
     <style>
-        html, body, [data-testid="stAppViewContainer"] {
+        html, body, .stApp, [data-testid="stAppViewContainer"], section.main, .main, [data-testid="stMain"] {
             overflow: hidden !important;
             height: 100vh !important;
+            max-height: 100vh !important;
         }
     </style>
     """, unsafe_allow_html=True)
 
-    col_nav1, col_nav2 = st.columns([8, 2])
+    col_nav1, col_nav2, col_nav3 = st.columns([7, 2.5, 1.5])
     with col_nav1:
         st.markdown(f"### 📄 `{filename}`")
         st.caption("Document Processing Pipeline Telemetry")
     with col_nav2:
+        if st.button("🔄 Re-process", key=f"reingest_top_{filename}", use_container_width=True, help="Force re-run pipeline from scratch"):
+            doc_fpath = get_project_docs_dir(project_id) / filename
+            if doc_fpath.exists():
+                with st.spinner(f"Re-processing `{filename}` with latest models & vision..."):
+                    run_ingestion_pipeline(project_id, doc_fpath, restart=True)
+                    st.success("Re-processing complete!")
+                    st.rerun()
+    with col_nav3:
         if st.button("✕ Close", use_container_width=True, type="primary"):
             st.session_state.inspecting_document = None
             st.rerun()
@@ -302,6 +383,9 @@ def render_pipeline_inspector(project_id: str, filename: str):
             st.markdown(f"<div class='metric-box'><div class='metric-value'>{part_stats.get('titles_headers', 0)}</div><div class='metric-label'>Titles/Headers</div></div>", unsafe_allow_html=True)
         with c5:
             st.markdown(f"<div class='metric-box'><div class='metric-value'>{part_stats.get('other_elements', 0)}</div><div class='metric-label'>Other elements</div></div>", unsafe_allow_html=True)
+
+        total_atomic = part_stats.get('total_elements', 0)
+        st.caption(f"💡 Total atomic elements discovered: **{total_atomic}** ({part_stats.get('text_sections', 0)} text + {part_stats.get('titles_headers', 0)} titles/headers + {part_stats.get('tables', 0)} tables + {part_stats.get('images', 0)} images).")
 
         st.markdown("<div class='success-banner'>✔ Step completed successfully</div>", unsafe_allow_html=True)
 
@@ -361,14 +445,14 @@ def render_pipeline_inspector(project_id: str, filename: str):
     # 4. Vectorization & Storage Tab
     with tab_vector:
         st.markdown("#### Vectorization & Storage")
-        st.caption("Generating OpenAI embeddings and indexing vectors into ChromaDB")
+        st.caption("Generating OpenAI embeddings and indexing vectors into PostgreSQL (pgvector)")
 
         vec_stats = stages.get("vectorization", {}).get("stats", {})
         
-        # Query live vector count directly from ChromaDB for real-time project accuracy
-        from core.vectorstore import get_project_vectorstore
+        # Query live vector count directly from PostgreSQL for real-time project accuracy
+        from core.vectorstore import get_live_vector_count
         try:
-            live_total_vectors = get_project_vectorstore(project_id)._collection.count()
+            live_total_vectors = get_live_vector_count(project_id) or vec_stats.get("total_vectors_stored", 0)
         except Exception:
             live_total_vectors = vec_stats.get("total_vectors_stored", 0)
 
@@ -378,9 +462,10 @@ def render_pipeline_inspector(project_id: str, filename: str):
         with c2:
             st.markdown(f"<div class='metric-box'><div class='metric-value'>{live_total_vectors}</div><div class='metric-label'>Total collection vector count (live)</div></div>", unsafe_allow_html=True)
 
+        db_engine_name = vec_stats.get("database_engine", "PostgreSQL (pgvector)")
         st.markdown(f"**Embedding Model**: `{vec_stats.get('embedding_model', 'text-embedding-3-small')}`")
-        st.markdown(f"**Chroma Collection**: `{vec_stats.get('collection_name', 'default')}`")
-        st.markdown(f"**Persistent Directory**: `{vec_stats.get('storage_path', '')}`")
+        st.markdown(f"**Database Engine**: `{db_engine_name}`")
+        st.markdown(f"**Storage Target**: `{vec_stats.get('storage_path', 'PostgreSQL database (retrio_db.document_chunks)')}`")
 
         st.markdown("<div class='success-banner'>✔ Step completed successfully</div>", unsafe_allow_html=True)
 
@@ -461,31 +546,60 @@ def render_pipeline_inspector(project_id: str, filename: str):
                         st.markdown("##### 💡 AI Summary")
                         st.info(selected_chunk["summary"])
 
+                    # If an extracted figure image file exists on disk, display it
+                    img_path = selected_chunk.get("image_path") or selected_chunk.get("metadata", {}).get("image_path")
+                    if img_path and os.path.isfile(img_path):
+                        st.markdown("##### 🖼️ Extracted Visual Figure")
+                        st.image(img_path, caption=selected_chunk.get("caption") or "Extracted Document Figure", use_container_width=True)
+
                     st.markdown("##### 📄 Content")
                     st.code(selected_chunk.get("content", ""), language="markdown")
 
                     if selected_chunk.get("metadata", {}).get("text_as_html"):
                         with st.expander("View Rendered HTML Table"):
-                            st.markdown(selected_chunk["metadata"]["text_as_html"], unsafe_allow_html=True)
+                            raw_html = selected_chunk["metadata"]["text_as_html"]
+                            # XSS sanitize: strip scripts and event handlers
+                            clean_html = re.sub(r"<(script|iframe|object|embed)[^>]*>.*?</\1>", "", raw_html, flags=re.IGNORECASE | re.DOTALL)
+                            clean_html = re.sub(r"on\w+\s*=\s*['\"][^'\"]*['\"]", "", clean_html, flags=re.IGNORECASE)
+                            clean_html = re.sub(r"javascript:\s*", "", clean_html, flags=re.IGNORECASE)
+                            st.markdown(clean_html, unsafe_allow_html=True)
                 else:
                     st.info("Select a chunk on the left to inspect its details.")
-                st.info("Select a chunk on the left to inspect its details.")
 
 
 # ====================================================================
 # SCREEN 1: 3-COLUMN HOME PAGE (RETRIO)
 # ====================================================================
 def render_retrio_home(project_id: str):
-    project = get_project(project_id)
+    if project_id:
+        try:
+            reconcile_project_documents(project_id)
+        except Exception:
+            pass
+    user_id = st.session_state.current_user["id"] if st.session_state.get("current_user") else None
+    project = get_project(project_id, owner_id=user_id) if project_id else None
     if not project:
-        all_projs = list_projects()
+        all_projs = list_projects(owner_id=user_id)
         if all_projs:
             st.session_state.active_project_id = all_projs[0]["id"]
             project = all_projs[0]
         else:
-            st.info("No projects available. Please create a new project.")
-            if st.button("➕ Create Project", type="primary"):
-                new_project_dialog()
+            col_l, col_m, col_r = st.columns([2.8, 5.4, 3.2], gap="medium")
+            with col_l:
+                st.markdown("<div class='retrio-logo'>⚡ Retrio</div>", unsafe_allow_html=True)
+                if st.session_state.get("current_user"):
+                    u_email = st.session_state.current_user.get("email", "")
+                    st.caption(f"👤 Signed in as **{u_email}**")
+                    if st.button("Sign Out", key="logout_empty"):
+                        st.session_state.current_user = None
+                        st.session_state.auth_token = None
+                        st.session_state.active_project_id = None
+                        st.session_state.messages = []
+                        st.rerun()
+            with col_m:
+                st.info("No projects available in your workspace. Please create a project to get started!")
+                if st.button("➕ Create Project", type="primary"):
+                    new_project_dialog()
             return
 
     # If the user clicked to inspect a document's pipeline, render Screen 2 (Pipeline Page)
@@ -496,9 +610,10 @@ def render_retrio_home(project_id: str):
     # Lock root browser viewport on home screen so only the inner chat messages scroll
     st.markdown("""
     <style>
-        html, body, [data-testid="stAppViewContainer"] {
+        html, body, .stApp, [data-testid="stAppViewContainer"], section.main, .main, [data-testid="stMain"] {
             overflow: hidden !important;
             height: 100vh !important;
+            max-height: 100vh !important;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -510,7 +625,19 @@ def render_retrio_home(project_id: str):
     # LEFT PANEL (Blue Box in drawing)
     # ==========================================
     with col_left:
-        st.markdown("<div class='retrio-logo'>⚡ Retrio</div>", unsafe_allow_html=True)
+        col_logo, col_logout = st.columns([6.8, 3.2])
+        with col_logo:
+            st.markdown("<div class='retrio-logo'>⚡ Retrio</div>", unsafe_allow_html=True)
+            if st.session_state.get("current_user"):
+                u_name = st.session_state.current_user.get("full_name") or st.session_state.current_user.get("email", "").split("@")[0]
+                st.caption(f"👤 **{u_name}**")
+        with col_logout:
+            if st.button("Sign Out", key="btn_logout", help="Sign out of your session", use_container_width=True):
+                st.session_state.current_user = None
+                st.session_state.auth_token = None
+                st.session_state.active_project_id = None
+                st.session_state.messages = []
+                st.rerun()
 
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
@@ -524,46 +651,48 @@ def render_retrio_home(project_id: str):
 
         # Current Project Indicator
         st.markdown("<div style='font-size:11px; color:#8b949e; text-transform:uppercase; font-weight:700;'>Current Project</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size:16px; font-weight:700; color:#58a6ff; margin-bottom:12px;'>📁 {project.get('name')}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:16px; font-weight:700; color:#58a6ff; margin-bottom:4px;'>📁 {project.get('name')}</div>", unsafe_allow_html=True)
 
         # Saved Chats for this project with 3-dots Menu (Rename / Delete)
         st.markdown("<div style='font-size:11px; color:#8b949e; text-transform:uppercase; font-weight:700; margin-bottom:8px;'>Conversations</div>", unsafe_allow_html=True)
         
-        project_chats = list_chats(project_id)
-        if not project_chats:
-            st.caption("No saved chats yet. Start asking questions in the center to create one!")
-        else:
-            for ch in project_chats:
-                cid = ch.get("chat_id")
-                ctitle = ch.get("title", "Untitled Chat")
-                is_active = (cid == st.session_state.active_chat_id)
-                btn_type = "primary" if is_active else "secondary"
-                
-                col_cbtn, col_cmenu = st.columns([7.8, 2.2])
-                with col_cbtn:
-                    if st.button(f"💬 {ctitle}", key=f"chat_{cid}", type=btn_type, use_container_width=True):
-                        st.session_state.active_chat_id = cid
-                        st.session_state.current_chat_title = ctitle
-                        st.session_state.messages = ch.get("messages", [])
-                        st.session_state.inspecting_document = None
-                        st.rerun()
-                with col_cmenu:
-                    with st.popover("⋮"):
-                        st.markdown("**Conversation**")
-                        new_title_val = st.text_input("Rename", value=ctitle, key=f"ren_txt_{cid}")
-                        if st.button("Save Name", key=f"btn_save_ren_{cid}", use_container_width=True):
-                            if new_title_val.strip():
-                                rename_chat(project_id, cid, new_title_val.strip())
-                                if cid == st.session_state.active_chat_id:
-                                    st.session_state.current_chat_title = new_title_val.strip()
-                                st.rerun()
-                        if st.button("🗑️ Delete", key=f"btn_del_chat_{cid}", type="primary", use_container_width=True):
-                            delete_chat(project_id, cid)
-                            if cid == st.session_state.active_chat_id:
-                                st.session_state.active_chat_id = str(uuid.uuid4())
-                                st.session_state.current_chat_title = "New Chat"
-                                st.session_state.messages = []
+        project_chats = list_chats(project_id, user_id=user_id)
+        chats_container = st.container(height=420)
+        with chats_container:
+            if not project_chats:
+                st.caption("No saved chats yet. Start asking questions in the center to create one!")
+            else:
+                for ch in project_chats:
+                    cid = ch.get("chat_id")
+                    ctitle = ch.get("title", "Untitled Chat")
+                    is_active = (cid == st.session_state.active_chat_id)
+                    btn_type = "primary" if is_active else "secondary"
+                    
+                    col_cbtn, col_cmenu = st.columns([7.8, 2.2])
+                    with col_cbtn:
+                        if st.button(f"💬 {ctitle}", key=f"chat_{cid}", type=btn_type, use_container_width=True):
+                            st.session_state.active_chat_id = cid
+                            st.session_state.current_chat_title = ctitle
+                            st.session_state.messages = ch.get("messages", [])
+                            st.session_state.inspecting_document = None
                             st.rerun()
+                    with col_cmenu:
+                        with st.popover("⋮"):
+                            st.markdown("**Conversation**")
+                            new_title_val = st.text_input("Rename", value=ctitle, key=f"ren_txt_{cid}")
+                            if st.button("Save Name", key=f"btn_save_ren_{cid}", use_container_width=True):
+                                if new_title_val.strip():
+                                    rename_chat(project_id, cid, new_title_val.strip(), user_id=user_id)
+                                    if cid == st.session_state.active_chat_id:
+                                        st.session_state.current_chat_title = new_title_val.strip()
+                                    st.rerun()
+                            if st.button("🗑️ Delete", key=f"btn_del_chat_{cid}", type="primary", use_container_width=True):
+                                delete_chat(project_id, cid, user_id=user_id)
+                                if cid == st.session_state.active_chat_id:
+                                    st.session_state.active_chat_id = str(uuid.uuid4())
+                                    st.session_state.current_chat_title = "New Chat"
+                                    st.session_state.messages = []
+                                st.rerun()
 
     # ==========================================
     # MIDDLE PANEL: ACTIVE CHAT (Red Box in drawing)
@@ -579,7 +708,7 @@ def render_retrio_home(project_id: str):
             if st.button("➕ New Chat", use_container_width=True, type="secondary"):
                 if st.session_state.messages:
                     auto_title = generate_chat_title(st.session_state.messages)
-                    save_chat(project_id, st.session_state.active_chat_id, auto_title, st.session_state.messages)
+                    save_chat(project_id, st.session_state.active_chat_id, auto_title, st.session_state.messages, user_id=user_id)
                 
                 st.session_state.active_chat_id = str(uuid.uuid4())
                 st.session_state.current_chat_title = "New Chat"
@@ -587,7 +716,7 @@ def render_retrio_home(project_id: str):
                 st.rerun()
 
         # Fixed height scrollable chat container sized to fit the screen without outer page scrolling
-        chat_container = st.container(height=495)
+        chat_container = st.container(height=450)
         with chat_container:
             if not st.session_state.messages:
                 st.markdown("""
@@ -603,6 +732,10 @@ def render_retrio_home(project_id: str):
                         st.markdown(msg["content"])
                         if msg.get("sources"):
                             with st.expander("📚 Retrieved Sources & Citations (BM25 + Dense RRF)"):
+                                if msg.get("search_query"):
+                                    st.caption(f"🔍 Reformulated Query: `{msg.get('search_query')}`")
+                                if msg.get("target_document"):
+                                    st.caption(f"🎯 Document Routing: `{msg.get('target_document')}`")
                                 for i, src in enumerate(msg["sources"]):
                                     st.markdown(f"**[{i+1}] {src.get('filename')} (Page {src.get('page_number')}) - `{src.get('type', 'text').upper()}`**")
                                     st.caption(f"Score: `{round(src.get('score', 0.0), 3)}` | Method: `{src.get('retrieval_method', 'hybrid')}`")
@@ -632,6 +765,10 @@ def render_retrio_home(project_id: str):
                         st.markdown(answer_text)
                         if sources:
                             with st.expander("📚 Retrieved Sources & Citations (BM25 + Dense RRF)"):
+                                if response.get("search_query"):
+                                    st.caption(f"🔍 Reformulated Query: `{response.get('search_query')}`")
+                                if response.get("target_document"):
+                                    st.caption(f"🎯 Document Routing: `{response.get('target_document')}`")
                                 for i, src in enumerate(sources):
                                     st.markdown(f"**[{i+1}] {src.get('filename')} (Page {src.get('page_number')}) - `{src.get('type', 'text').upper()}`**")
                                     st.caption(f"Score: `{round(src.get('score', 0.0), 3)}` | Method: `{src.get('retrieval_method', 'hybrid')}`")
@@ -641,6 +778,8 @@ def render_retrio_home(project_id: str):
                 "role": "assistant",
                 "content": answer_text,
                 "sources": sources,
+                "search_query": response.get("search_query"),
+                "target_document": response.get("target_document"),
             })
 
             save_chat(
@@ -648,6 +787,7 @@ def render_retrio_home(project_id: str):
                 chat_id=st.session_state.active_chat_id,
                 title=st.session_state.current_chat_title,
                 messages=st.session_state.messages,
+                user_id=user_id,
             )
             st.rerun()
 
@@ -668,10 +808,11 @@ def render_retrio_home(project_id: str):
         )
 
         if uploaded_file is not None:
-            save_dir = get_project_docs_dir(project_id)
-            saved_file_path = save_dir / uploaded_file.name
+            upload_token = f"{project_id}_{uploaded_file.name}_{uploaded_file.size}"
+            if st.session_state.get("last_uploaded_token") != upload_token:
+                save_dir = get_project_docs_dir(project_id)
+                saved_file_path = save_dir / uploaded_file.name
 
-            if not saved_file_path.exists():
                 with open(saved_file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
@@ -681,56 +822,170 @@ def render_retrio_home(project_id: str):
                     progress_bar.progress(pct, text=f"Executing {stage_name} ({step}/{total})...")
 
                 with st.spinner(f"Ingesting `{uploaded_file.name}`..."):
-                    run_ingestion_pipeline(project_id, saved_file_path, progress_callback=on_step_progress)
+                    run_ingestion_pipeline(project_id, saved_file_path, progress_callback=on_step_progress, restart=True)
+                    st.session_state.last_uploaded_token = upload_token
                     progress_bar.progress(100, text="Ingestion completed successfully!")
-                    st.success(f"`{uploaded_file.name}` indexed into ChromaDB!")
+                    st.success(f"`{uploaded_file.name}` indexed into PostgreSQL (pgvector)!")
+                    st.session_state.inspecting_document = uploaded_file.name
                     st.rerun()
 
         st.markdown("---")
 
-        # Section: Sources List (Click source to open pipeline directly + 3-dots delete menu)
-        st.markdown("##### Sources")
-        docs_dir = get_project_docs_dir(project_id)
-        source_files = [f for f in docs_dir.iterdir() if f.is_file() and not f.name.endswith(".pipeline.json")]
+        # Knowledge Base Sources Header
+        st.markdown("<div style='font-size:11px; color:#8b949e; text-transform:uppercase; font-weight:700; margin-bottom:8px;'>Knowledge Base Sources</div>", unsafe_allow_html=True)
 
-        if not source_files:
-            st.info("No sources added yet. Drop a file above to index it!")
-        else:
-            for sfile in source_files:
-                size_mb = round(sfile.stat().st_size / (1024 * 1024), 2)
-                size_str = f"{size_mb} MB" if size_mb >= 0.01 else f"{round(sfile.stat().st_size / 1024, 1)} KB"
+        # Scrollable container for Paused Ingestions and Knowledge Base Sources
+        sources_container = st.container(height=310)
+        with sources_container:
+            # Section: Paused / Interrupted Ingestions
+            interrupted_docs = get_interrupted_documents(project_id)
+            if interrupted_docs:
+                st.markdown("##### ⚠️ Paused Ingestions")
+                for item in interrupted_docs:
+                    fname = item["filename"]
+                    lstage = item["last_stage"].capitalize()
+                    fpath = get_project_docs_dir(project_id) / fname
 
-                col_sbtn, col_smenu = st.columns([8.2, 1.8])
-                with col_sbtn:
-                    # Clicking the document card directly opens the Pipeline Page
-                    doc_label = f"📄 {sfile.name}  ({size_str})"
-                    if st.button(doc_label, key=f"src_card_{sfile.name}", use_container_width=True, help="Click to view processing pipeline"):
-                        st.session_state.inspecting_document = sfile.name
-                        st.rerun()
-                with col_smenu:
-                    with st.popover("⋮"):
-                        st.markdown("**Source Options**")
-                        st.caption(f"`{sfile.name}`")
-                        if st.button("⚡ Inspect Pipeline", key=f"pop_pipe_{sfile.name}", use_container_width=True):
+                    st.warning(f"**`{fname}`** paused after: **{lstage}**")
+                    col_res, col_disc = st.columns([1, 1])
+                    with col_res:
+                        if st.button(f"▶ Resume", key=f"res_{fname}", type="primary", use_container_width=True):
+                            progress_bar = st.progress(0, text="Resuming ingestion from checkpoint...")
+                            def on_resume_progress(stage_name, step, total):
+                                pct = int((step / total) * 100)
+                                progress_bar.progress(pct, text=f"Executing {stage_name} ({step}/{total})...")
+
+                            with st.spinner(f"Resuming `{fname}`..."):
+                                run_ingestion_pipeline(project_id, fpath, progress_callback=on_resume_progress)
+                                st.success(f"`{fname}` completed and indexed into PostgreSQL (pgvector)!")
+                                st.rerun()
+                    with col_disc:
+                        if st.button(f"🗑️ Discard", key=f"disc_{fname}", use_container_width=True):
+                            delete_source_document(project_id, fname)
+                            st.info(f"Discarded `{fname}`")
+                            st.rerun()
+
+                st.markdown("---")
+
+            # Section: Sources List (Click source to open pipeline directly + 3-dots delete menu)
+            docs_dir = get_project_docs_dir(project_id)
+            interrupted_filenames = {item["filename"] for item in interrupted_docs}
+            source_files = [
+                f for f in docs_dir.iterdir()
+                if f.is_file()
+                and not f.name.endswith(".pipeline.json")
+                and not f.name.endswith(".checkpoint.json")
+                and f.name not in interrupted_filenames
+            ]
+
+            if not source_files:
+                st.info("No sources added yet. Drop a file above to index it!")
+            else:
+                for sfile in source_files:
+                    size_mb = round(sfile.stat().st_size / (1024 * 1024), 2)
+                    size_str = f"{size_mb} MB" if size_mb >= 0.01 else f"{round(sfile.stat().st_size / 1024, 1)} KB"
+
+                    col_sbtn, col_smenu = st.columns([8.2, 1.8])
+                    with col_sbtn:
+                        # Clicking the document card directly opens the Pipeline Page
+                        doc_label = f"📄 {sfile.name}  ({size_str})"
+                        if st.button(doc_label, key=f"src_card_{sfile.name}", use_container_width=True, help="Click to view processing pipeline"):
                             st.session_state.inspecting_document = sfile.name
                             st.rerun()
-                        if st.button("🗑️ Delete Source", key=f"del_src_{sfile.name}", type="primary", use_container_width=True):
-                            delete_source_document(project_id, sfile.name)
-                            st.success(f"Deleted `{sfile.name}`")
+                    with col_smenu:
+                        with st.popover("⋮"):
+                            st.markdown("**Source Options**")
+                            st.caption(f"`{sfile.name}`")
+                            if st.button("⚡ Inspect Pipeline", key=f"pop_pipe_{sfile.name}", use_container_width=True):
+                                st.session_state.inspecting_document = sfile.name
+                                st.rerun()
+                            if st.button("🔄 Re-process Document", key=f"reingest_{sfile.name}", use_container_width=True):
+                                with st.spinner(f"Re-processing `{sfile.name}`..."):
+                                    run_ingestion_pipeline(project_id, sfile, restart=True)
+                                    st.success(f"Re-processed `{sfile.name}`!")
+                                    st.session_state.inspecting_document = sfile.name
+                                    st.rerun()
+                            if st.button("🗑️ Delete Source", key=f"del_src_{sfile.name}", type="primary", use_container_width=True):
+                                delete_source_document(project_id, sfile.name)
+                                st.success(f"Deleted `{sfile.name}`")
+                                st.rerun()
+
+
+# ====================================================================
+# AUTHENTICATION & LOGIN SCREEN
+# ====================================================================
+def render_auth_screen():
+    st.markdown("""
+    <div style='text-align: center; margin-top: 50px; margin-bottom: 25px;'>
+        <div class='retrio-logo' style='font-size: 38px;'>⚡ Retrio</div>
+        <div style='color: #8b949e; font-size: 14px; margin-top: 4px;'>Enterprise Multi-Modal RAG & Knowledge Base</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    with col2:
+        auth_tab1, auth_tab2 = st.tabs(["🔒 Sign In", "✨ Register Account"])
+
+        with auth_tab1:
+            with st.form("login_form"):
+                email = st.text_input("Email", placeholder="name@company.com")
+                password = st.text_input("Password", type="password", placeholder="••••••••")
+                submitted = st.form_submit_button("Sign In", type="primary", use_container_width=True)
+                if submitted:
+                    if not email.strip() or not password:
+                        st.error("Please enter email and password.")
+                    else:
+                        user = authenticate_user(email.strip(), password)
+                        if user:
+                            token = create_access_token({"sub": user["id"], "email": user["email"], "role": user.get("role", "user")})
+                            st.session_state.current_user = user
+                            st.session_state.auth_token = token
+                            st.session_state.active_project_id = None
+                            st.session_state.messages = []
                             st.rerun()
+                        else:
+                            st.error("Invalid email or password.")
+
+        with auth_tab2:
+            with st.form("register_form"):
+                reg_name = st.text_input("Full Name", placeholder="e.g. Alice Smith")
+                reg_email = st.text_input("Email", placeholder="name@company.com")
+                reg_password = st.text_input("Password (min 6 characters)", type="password", placeholder="••••••••")
+                reg_confirm = st.text_input("Confirm Password", type="password", placeholder="••••••••")
+                reg_submitted = st.form_submit_button("Create Account", type="primary", use_container_width=True)
+                if reg_submitted:
+                    if not reg_email.strip() or not reg_password:
+                        st.error("Please enter email and password.")
+                    elif len(reg_password) < 6:
+                        st.error("Password must be at least 6 characters.")
+                    elif reg_password != reg_confirm:
+                        st.error("Passwords do not match.")
+                    else:
+                        try:
+                            user = create_user(reg_email.strip(), reg_password, reg_name.strip())
+                            token = create_access_token({"sub": user["id"], "email": user["email"], "role": user.get("role", "user")})
+                            st.session_state.current_user = user
+                            st.session_state.auth_token = token
+                            st.session_state.active_project_id = None
+                            st.session_state.messages = []
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
 
 # ====================================================================
 # MAIN APPLICATION ROUTING
 # ====================================================================
 def main():
+    if not st.session_state.get("current_user"):
+        render_auth_screen()
+        return
+
+    user_id = st.session_state.current_user["id"]
     if not st.session_state.active_project_id:
-        all_projs = list_projects()
-        if all_projs:
-            st.session_state.active_project_id = all_projs[0]["id"]
-        else:
-            starter = create_project("Research", "Multi-modal RAG documentation & research")
-            st.session_state.active_project_id = starter["id"]
+        user_projs = list_projects(owner_id=user_id)
+        if user_projs:
+            st.session_state.active_project_id = user_projs[0]["id"]
 
     render_retrio_home(st.session_state.active_project_id)
 

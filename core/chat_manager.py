@@ -1,10 +1,12 @@
 import json
-import uuid
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from sqlalchemy.sql import func
 from core.config import PROJECTS_DIR, DEFAULT_LLM_MODEL, OPENAI_API_KEY
+from db.session import get_db_session, is_db_connected, init_db
+from db.models import Conversation, Message
 
 
 def get_project_chats_dir(project_id: str) -> Path:
@@ -14,8 +16,12 @@ def get_project_chats_dir(project_id: str) -> Path:
     return chats_dir
 
 
-def list_chats(project_id: str) -> List[Dict[str, Any]]:
-    """Lists all saved chats for a given project, sorted newest first."""
+# ====================================================================
+# JSON STORAGE FALLBACK IMPLEMENTATIONS
+# ====================================================================
+
+def _list_chats_json(project_id: str) -> List[Dict[str, Any]]:
+    """Lists all stored JSON conversations for a project, sorted newest first."""
     chats_dir = get_project_chats_dir(project_id)
     chats = []
     for f in chats_dir.glob("*.json"):
@@ -25,14 +31,12 @@ def list_chats(project_id: str) -> List[Dict[str, Any]]:
                 chats.append(data)
         except Exception:
             pass
-
-    # Sort by updated_timestamp descending
     chats.sort(key=lambda c: c.get("updated_timestamp", c.get("created_timestamp", 0)), reverse=True)
     return chats
 
 
-def get_chat(project_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
-    """Loads a specific chat session."""
+def _get_chat_json(project_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
+    """Loads a single conversation from disk by project and chat ID."""
     chats_dir = get_project_chats_dir(project_id)
     chat_file = chats_dir / f"{chat_id}.json"
     if chat_file.exists():
@@ -44,31 +48,34 @@ def get_chat(project_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def save_chat(
+def _save_chat_json(
     project_id: str,
     chat_id: str,
     title: str,
     messages: List[Dict[str, Any]],
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Saves or updates a conversation session on disk."""
+    """Persists a conversation to disk as JSON."""
     chats_dir = get_project_chats_dir(project_id)
     chat_file = chats_dir / f"{chat_id}.json"
 
     now_ts = time.time()
     now_str = time.strftime("%d/%m/%Y %H:%M")
 
-    # If already exists, preserve creation time
     created_ts = now_ts
     created_str = now_str
     if chat_file.exists():
-        existing = get_chat(project_id, chat_id)
+        existing = _get_chat_json(project_id, chat_id)
         if existing:
             created_ts = existing.get("created_timestamp", now_ts)
             created_str = existing.get("created_at", now_str)
+            if not user_id:
+                user_id = existing.get("user_id")
 
     chat_data = {
         "chat_id": chat_id,
         "project_id": project_id,
+        "user_id": user_id,
         "title": title.strip() or "Untitled Chat",
         "created_at": created_str,
         "created_timestamp": created_ts,
@@ -83,9 +90,9 @@ def save_chat(
     return chat_data
 
 
-def rename_chat(project_id: str, chat_id: str, new_title: str) -> bool:
-    """Renames an existing chat."""
-    chat = get_chat(project_id, chat_id)
+def _rename_chat_json(project_id: str, chat_id: str, new_title: str) -> bool:
+    """Updates the title of a JSON conversation on disk."""
+    chat = _get_chat_json(project_id, chat_id)
     if not chat:
         return False
     chat["title"] = new_title.strip() or "Untitled Chat"
@@ -97,13 +104,203 @@ def rename_chat(project_id: str, chat_id: str, new_title: str) -> bool:
     return True
 
 
-def delete_chat(project_id: str, chat_id: str) -> bool:
-    """Deletes a chat file from disk."""
+def _delete_chat_json(project_id: str, chat_id: str) -> bool:
+    """Deletes a JSON conversation file from disk."""
     chat_file = get_project_chats_dir(project_id) / f"{chat_id}.json"
     if chat_file.exists():
         chat_file.unlink()
         return True
     return False
+
+
+def _sync_json_to_db(session, project_id: str):
+    """Automatically migrates any legacy JSON chats on disk into PostgreSQL."""
+    json_chats = _list_chats_json(project_id)
+    for jc in json_chats:
+        cid = jc.get("chat_id")
+        if not cid:
+            continue
+        existing = session.query(Conversation).filter(Conversation.id == cid).first()
+        if not existing:
+            conv = Conversation(
+                id=cid,
+                project_id=project_id,
+                user_id=jc.get("user_id"),
+                title=jc.get("title", "Untitled Chat"),
+            )
+            session.add(conv)
+            session.flush()
+
+            for m in jc.get("messages", []):
+                msg = Message(
+                    conversation_id=cid,
+                    role=m.get("role", "user"),
+                    content=m.get("content", ""),
+                    sources=m.get("sources"),
+                )
+                session.add(msg)
+        elif not existing.user_id and jc.get("user_id"):
+            existing.user_id = jc.get("user_id")
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+
+
+# ====================================================================
+# PRIMARY CHAT MANAGER (POSTGRESQL + ORM WITH DUAL-MODE FALLBACK)
+# ====================================================================
+
+def list_chats(project_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Lists all saved chats for a given project, strictly isolated to the specified user."""
+    if is_db_connected():
+        try:
+            init_db()
+            with get_db_session() as session:
+                _sync_json_to_db(session, project_id)
+                query = session.query(Conversation).filter(Conversation.project_id == project_id)
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                else:
+                    return []
+                convs = query.order_by(Conversation.updated_at.desc()).all()
+                return [c.to_dict() for c in convs]
+        except Exception as e:
+            print(f"Warning: Database error in list_chats, falling back to JSON: {e}")
+
+    chats = _list_chats_json(project_id)
+    if user_id:
+        chats = [c for c in chats if c.get("user_id") == user_id]
+    else:
+        return []
+    return chats
+
+
+def get_chat(project_id: str, chat_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Loads a specific chat session with strict user verification."""
+    if is_db_connected():
+        try:
+            with get_db_session() as session:
+                query = session.query(Conversation).filter(
+                    Conversation.id == chat_id,
+                    Conversation.project_id == project_id
+                )
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                conv = query.first()
+                if conv:
+                    return conv.to_dict()
+                return None
+        except Exception as e:
+            print(f"Warning: Database error in get_chat, falling back to JSON: {e}")
+
+    chat = _get_chat_json(project_id, chat_id)
+    if chat and user_id and chat.get("user_id") != user_id:
+        return None
+    return chat
+
+
+def save_chat(
+    project_id: str,
+    chat_id: str,
+    title: str,
+    messages: List[Dict[str, Any]],
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Saves or updates a conversation session in PostgreSQL (and syncs to JSON)."""
+    if is_db_connected():
+        try:
+            init_db()
+            with get_db_session() as session:
+                conv = session.query(Conversation).filter(Conversation.id == chat_id).first()
+                clean_title = title.strip() or "Untitled Chat"
+
+                if not conv:
+                    conv = Conversation(
+                        id=chat_id,
+                        project_id=project_id,
+                        user_id=user_id,
+                        title=clean_title,
+                    )
+                    session.add(conv)
+                else:
+                    conv.title = clean_title
+                    if user_id:
+                        conv.user_id = user_id
+                    conv.updated_at = func.now()
+
+                session.flush()
+
+                # Replace messages with current dialogue state
+                session.query(Message).filter(Message.conversation_id == chat_id).delete()
+                for m in messages:
+                    msg = Message(
+                        conversation_id=chat_id,
+                        role=m.get("role", "user"),
+                        content=m.get("content", ""),
+                        sources=m.get("sources"),
+                    )
+                    session.add(msg)
+
+                session.commit()
+                session.refresh(conv)
+
+                # Keep JSON in sync as secondary backup
+                _save_chat_json(project_id, chat_id, clean_title, messages, user_id=user_id)
+                return conv.to_dict()
+        except Exception as e:
+            print(f"Warning: Database error in save_chat, falling back to JSON: {e}")
+
+    return _save_chat_json(project_id, chat_id, title, messages, user_id=user_id)
+
+
+def rename_chat(project_id: str, chat_id: str, new_title: str, user_id: Optional[str] = None) -> bool:
+    """Renames an existing chat for the specified user."""
+    if is_db_connected():
+        try:
+            with get_db_session() as session:
+                query = session.query(Conversation).filter(Conversation.id == chat_id, Conversation.project_id == project_id)
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                conv = query.first()
+                if conv:
+                    conv.title = new_title.strip() or "Untitled Chat"
+                    conv.updated_at = func.now()
+                    session.commit()
+                    _rename_chat_json(project_id, chat_id, new_title)
+                    return True
+                return False
+        except Exception as e:
+            print(f"Warning: Database error in rename_chat, falling back to JSON: {e}")
+
+    chat = _get_chat_json(project_id, chat_id)
+    if chat and user_id and chat.get("user_id") != user_id:
+        return False
+    return _rename_chat_json(project_id, chat_id, new_title)
+
+
+def delete_chat(project_id: str, chat_id: str, user_id: Optional[str] = None) -> bool:
+    """Deletes a chat from database and disk for the specified user."""
+    if is_db_connected():
+        try:
+            with get_db_session() as session:
+                query = session.query(Conversation).filter(Conversation.id == chat_id, Conversation.project_id == project_id)
+                if user_id:
+                    query = query.filter(Conversation.user_id == user_id)
+                conv = query.first()
+                if conv:
+                    session.delete(conv)
+                    session.commit()
+                    _delete_chat_json(project_id, chat_id)
+                    return True
+                return False
+        except Exception as e:
+            print(f"Warning: Database error in delete_chat, falling back to JSON: {e}")
+
+    chat = _get_chat_json(project_id, chat_id)
+    if chat and user_id and chat.get("user_id") != user_id:
+        return False
+    return _delete_chat_json(project_id, chat_id)
 
 
 def generate_chat_title(messages: List[Dict[str, Any]]) -> str:

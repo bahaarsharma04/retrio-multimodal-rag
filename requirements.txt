@@ -1,15 +1,19 @@
-# Core Web Framework
+# Core Web & REST API Frameworks
 streamlit>=1.40.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# Database, ORM & Migrations (PostgreSQL)
+sqlalchemy>=2.0.30
+alembic>=1.14.0
+psycopg2-binary>=2.9.10
+pgvector>=0.3.0
 
 # LLM & RAG Orchestration
 langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-community>=0.3.0
 langchain-openai>=0.2.0
-langchain-chroma>=0.1.4
-
-# Vector Database
-chromadb>=0.5.0
 
 # Hybrid Search & Reranking
 rank-bm25>=0.2.2
@@ -28,6 +32,13 @@ python-docx>=1.1.0
 pandas>=2.2.0
 pillow>=10.0.0
 tabulate>=0.9.0
+
+# Authentication, Security & Rate Limiting
+pyjwt>=2.8.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0
+slowapi>=0.1.9
+python-multipart>=0.0.9
 
 # Utilities
 python-dotenv>=1.0.0
