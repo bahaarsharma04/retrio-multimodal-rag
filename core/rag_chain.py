@@ -14,7 +14,7 @@ from core.config import (
 from core.retriever import HybridRetriever
 from core.logger import generation_logger
 
-RAG_SYSTEM_PROMPT = """You are Retrio, an advanced technical AI assistant providing accurate, strictly document-grounded answers using a multi-modal knowledge base.
+RAG_SYSTEM_PROMPT = r"""You are Retrio, an advanced technical AI assistant providing accurate, strictly document-grounded answers using a multi-modal knowledge base.
 You are provided with verified context snippets extracted from documents (including narrative text, tables, and figure descriptions) as well as the recent conversation history.
 
 Follow these universal rules for all uploaded documents:
@@ -263,6 +263,23 @@ def detect_target_document(
     return None
 
 
+def sanitize_document_data(text: str) -> str:
+    """
+    Sanitizes untrusted document text before injecting into LLM context.
+    Neutralizes delimiter injection attacks, fake XML closing tags, and control characters.
+    """
+    if not text:
+        return ""
+    # Strip null bytes and harmful control characters
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    # Neutralize XML context delimiter breakout sequences
+    cleaned = cleaned.replace("</retrieved_context>", "&lt;/retrieved_context&gt;")
+    cleaned = cleaned.replace("<retrieved_context>", "&lt;retrieved_context&gt;")
+    cleaned = cleaned.replace("</system>", "&lt;/system&gt;")
+    cleaned = cleaned.replace("<system>", "&lt;system&gt;")
+    return cleaned
+
+
 def format_context_block(sources: List[Dict[str, Any]]) -> str:
     """Formats retrieved chunks into a clean, structured context string."""
     if not sources:
@@ -278,10 +295,11 @@ def format_context_block(sources: List[Dict[str, Any]]) -> str:
     for orig_idx, s in sorted_sources:
         sec = s.get("section") or s.get("metadata", {}).get("section") or "General"
         src_header = f"--- [Snippet {orig_idx+1} | Source: {s.get('filename', 'doc')} | Page: {s.get('page_number', 1)} | Section: {sec} | Type: {s.get('type', 'text').upper()}] ---"
-        content = s.get("content", "").strip()
+        content = sanitize_document_data(s.get("content", "").strip())
         summary = s.get("summary")
         if summary:
-            snippet_body = f"AI Summary: {summary}\n\nContent:\n{content}"
+            sanitized_summary = sanitize_document_data(summary)
+            snippet_body = f"AI Summary: {sanitized_summary}\n\nContent:\n{content}"
         else:
             snippet_body = content
 

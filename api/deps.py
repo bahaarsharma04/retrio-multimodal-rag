@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from typing import Optional, Dict, Any
 
-from core.security import decode_access_token
+from core.security import decode_access_token, is_token_revoked
 from core.users import get_user_by_id
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
@@ -20,11 +20,25 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> Dict[str,
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    if is_token_revoked(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token has been revoked. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     payload = decode_access_token(token)
     if not payload or "sub" not in payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired authentication token. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if payload.get("type") == "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type: refresh tokens cannot be used directly for API authorization.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

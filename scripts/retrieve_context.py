@@ -66,6 +66,7 @@ def main():
         help="Retrieval mode (default: hybrid)",
     )
     parser.add_argument("--output-json", type=str, default=None, help="Save retrieved snippets to a JSON file")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Display full chunk text in addition to first 100 characters")
 
     args = parser.parse_args()
 
@@ -248,7 +249,10 @@ def main():
 
             print(f"[{idx:>2}] [{stype}] {fname} (Page {page}) - \"{title}\"")
             print(f"     Score: {score_str} | tokensize: {chunk_tokens} tokens")
-            print(f"     First 100 chars: \"{first_100}\"\n")
+            print(f"     First 100 chars: \"{first_100}\"")
+            if args.verbose:
+                print(f"     Full content:\n     " + "\n     ".join((s.get("content") or "").strip().splitlines()))
+            print()
 
     print("=" * width)
 

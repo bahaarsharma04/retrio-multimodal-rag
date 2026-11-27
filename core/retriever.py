@@ -1,7 +1,7 @@
 import os
 import re
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from rank_bm25 import BM25Okapi
 
 from core.config import (
@@ -57,6 +57,46 @@ def tokenize_for_bm25(text: str, filter_stopwords: bool = True) -> List[str]:
     return cleaned
 
 
+# Thread-safe in-memory cache for pre-built BM25 index and chunk objects per project
+_PROJECT_BM25_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def get_cached_project_bm25(project_id: str, force_refresh: bool = False) -> Tuple[List[Dict[str, Any]], Optional[BM25Okapi]]:
+    """
+    Retrieves or builds the BM25 index for a project from an in-memory cache.
+    Eliminates redundant database queries and expensive re-tokenization on every user question.
+    """
+    global _PROJECT_BM25_CACHE
+    if not force_refresh and project_id in _PROJECT_BM25_CACHE:
+        entry = _PROJECT_BM25_CACHE[project_id]
+        return entry["chunks"], entry["bm25"]
+
+    chunks = get_all_chunks(project_id)
+    bm25 = None
+    if chunks:
+        tokenized_corpus = [
+            tokenize_for_bm25(c.get("indexed_text") or c.get("content", ""), filter_stopwords=False)
+            for c in chunks
+        ]
+        bm25 = BM25Okapi(tokenized_corpus)
+
+    _PROJECT_BM25_CACHE[project_id] = {
+        "chunks": chunks,
+        "bm25": bm25,
+        "cached_at": time.time(),
+    }
+    return chunks, bm25
+
+
+def invalidate_bm25_cache(project_id: Optional[str] = None) -> None:
+    """Invalidates the cached BM25 index for a project (or all projects)."""
+    global _PROJECT_BM25_CACHE
+    if project_id is None:
+        _PROJECT_BM25_CACHE.clear()
+    else:
+        _PROJECT_BM25_CACHE.pop(project_id, None)
+
+
 class HybridRetriever:
     """
     Combines Dense Vector Retrieval (PostgreSQL pgvector) with
@@ -64,18 +104,9 @@ class HybridRetriever:
     followed by an optional Cohere neural reranking stage.
     """
 
-    def __init__(self, project_id: str):
+    def __init__(self, project_id: str, force_refresh: bool = False):
         self.project_id = project_id
-        self.chunks: List[Dict[str, Any]] = get_all_chunks(project_id)
-        
-        # Initialize BM25 corpus index with cleaned, punctuation-free tokens
-        self.bm25: Optional[BM25Okapi] = None
-        if self.chunks:
-            tokenized_corpus = [
-                tokenize_for_bm25(c.get("indexed_text") or c.get("content", ""), filter_stopwords=False)
-                for c in self.chunks
-            ]
-            self.bm25 = BM25Okapi(tokenized_corpus)
+        self.chunks, self.bm25 = get_cached_project_bm25(project_id, force_refresh=force_refresh)
 
     def _dense_search(self, query: str, k: int, filename_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """Performs semantic similarity search via PostgreSQL (pgvector)."""

@@ -10,6 +10,7 @@ from api.routers import auth, chat, projects, documents
 from db.session import init_db, is_db_connected
 from core.logger import app_logger
 from core.limiter import limiter
+from core.config import ALLOWED_ORIGINS
 
 
 @asynccontextmanager
@@ -19,7 +20,7 @@ async def lifespan(app: FastAPI):
         init_db()
         app_logger.info("Connected to PostgreSQL database successfully.")
     else:
-        app_logger.info("PostgreSQL database not reachable; operating in local JSON fallback mode.")
+        app_logger.warning("PostgreSQL database not reachable. PostgreSQL with pgvector is required for search and storage.")
     yield
 
 
@@ -46,10 +47,10 @@ async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
         headers={"Retry-After": "60"},
     )
 
-# Enable CORS for external frontends / Postman / web apps
+# Enable CORS for authorized frontends only
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

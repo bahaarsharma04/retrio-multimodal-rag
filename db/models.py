@@ -2,7 +2,7 @@ import uuid
 from typing import Dict, Any
 from sqlalchemy import (
     Column, String, BigInteger, Integer, Float, Text,
-    DateTime, ForeignKey, JSON, Boolean
+    DateTime, ForeignKey, JSON, Boolean, Index
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -225,6 +225,15 @@ class DocumentChunk(Base):
     char_count = Column(Integer, default=0)
     embedding = Column(Vector(1536), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_document_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
 
     document = relationship("Document", back_populates="chunks")
 

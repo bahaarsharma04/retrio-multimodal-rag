@@ -57,6 +57,11 @@ def init_db() -> bool:
                     conn.execute(text('ALTER TABLE documents ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
                     conn.execute(text('ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
                     conn.execute(text('ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE;'))
+                    # HNSW vector index for pgvector cosine distance
+                    try:
+                        conn.execute(text('CREATE INDEX IF NOT EXISTS ix_document_chunks_embedding_hnsw ON document_chunks USING hnsw (embedding vector_cosine_ops);'))
+                    except Exception as hnsw_err:
+                        print(f"Notice: HNSW index creation skipped: {hnsw_err}")
                     conn.commit()
             except Exception as e:
                 print(f"Notice: Column migration note: {e}")

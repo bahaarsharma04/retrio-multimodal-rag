@@ -18,6 +18,7 @@ __pycache__/
 # Local Data, Uploads & Vector Databases
 data/
 logs/
+*.log
 *.sqlite3
 *.parquet
 
@@ -31,3 +32,6 @@ Thumbs.db
 # Temporary scratch and benchmark scripts
 scratch/
 
+db/alembic/
+pytest.ini
+alembic.ini

@@ -143,12 +143,25 @@ def test_background_ingestion():
     assert final_status == "completed", f"Expected completed, got {final_status}"
     print(f"✔ Ingestion successfully completed in background!")
 
-    # 4. Cleanup test document
+    # 4. Check Pipeline Audit Record
+    pipeline_resp = client.get(
+        f"/api/v1/projects/{project_id}/documents/{test_filename}/pipeline",
+        headers=headers,
+    )
+    if pipeline_resp.status_code == 200:
+        p_data = pipeline_resp.json()
+        print("\n✔ Pipeline Execution Audit Record:")
+        print(f"   • Status:      {p_data.get('status')}")
+        print(f"   • Stages Run:  {list(p_data.get('stages', {}).keys())}")
+        for s_name, s_info in p_data.get("stages", {}).items():
+            print(f"      - {s_name:<15s}: status={s_info.get('status')} | details={s_info}")
+
+    # 5. Cleanup test document
     del_resp = client.delete(
         f"/api/v1/projects/{project_id}/documents/{test_filename}",
         headers=headers,
     )
-    print(f"✔ Cleaned up test document ({del_resp.status_code}).")
+    print(f"\n✔ Cleaned up test document ({del_resp.status_code}).")
 
 
 if __name__ == "__main__":

@@ -1,44 +1,47 @@
 # Core Web & REST API Frameworks
-streamlit>=1.40.0
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
+streamlit==1.66.1
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
 
 # Database, ORM & Migrations (PostgreSQL)
-sqlalchemy>=2.0.30
-alembic>=1.14.0
-psycopg2-binary>=2.9.10
-pgvector>=0.3.0
+sqlalchemy==2.1.6
+alembic==1.20.1
+psycopg2-binary==2.9.13
+pgvector==0.5.1
 
 # LLM & RAG Orchestration
-langchain>=0.3.0
-langchain-core>=0.3.0
-langchain-community>=0.3.0
-langchain-openai>=0.2.0
+langchain==1.4.7
+langchain-core==1.6.13
+langchain-community==0.4.2
+langchain-openai==1.7.2
 
 # Hybrid Search & Reranking
-rank-bm25>=0.2.2
-cohere>=5.0.0
+rank-bm25==0.2.2
+cohere==7.3.0
+tiktoken==0.14.0
 
 # Document Layout & Multi-Format Parsing
-unstructured>=0.16.0
-unstructured-inference>=0.8.0
-pdfminer.six>=20231228
-pdfplumber>=0.11.0
-pdf2image>=1.17.0
-pytesseract>=0.3.10
-pi-heif>=0.18.0
-pypdf>=5.0.0
-python-docx>=1.1.0
-pandas>=2.2.0
-pillow>=10.0.0
-tabulate>=0.9.0
+unstructured==0.27.33
+unstructured-inference==1.6.14
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pdf2image==1.17.0
+pytesseract==0.3.13
+pi-heif==1.4.0
+pypdf==6.21.2
+python-docx==1.2.0
+pandas==3.0.6
+pillow==13.0.0
+tabulate==0.10.0
 
 # Authentication, Security & Rate Limiting
-pyjwt>=2.8.0
-passlib[bcrypt]>=1.7.4
-bcrypt>=4.0.0
-slowapi>=0.1.9
-python-multipart>=0.0.9
+pyjwt==2.15.1
+passlib[bcrypt]==1.7.4
+bcrypt==5.0.0
+slowapi==0.1.10
+python-multipart==0.0.32
 
-# Utilities
-python-dotenv>=1.0.0
+# Utilities & Automated Testing
+python-dotenv==1.2.4
+pytest>=8.0.0
+httpx>=0.27.0

@@ -39,6 +39,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from core.projects import list_projects
 from core.rag_chain import generate_rag_response
 from core.vectorstore import get_live_vector_count
+from core.retriever import count_tokens
 
 BENCHMARK_DIR = PROJECT_ROOT / "data" / "benchmarks"
 DEFAULT_OUTPUT_PATH = BENCHMARK_DIR / "latest_accuracy.json"
@@ -457,6 +458,18 @@ def run_evaluation(
             expected_meta_count=tc.get("expected_meta_count", 0),
         )
 
+        # Calculate tokensizes and snippet previews
+        q_tokens = count_tokens(tc["query"])
+        ans_tokens = count_tokens(answer)
+        ans_first_100 = answer.replace("\n", " ")[:100].strip()
+        sources_total_tokens = 0
+        for s in sources:
+            s_text = s.get("text") or s.get("content") or ""
+            s_tok = count_tokens(s_text)
+            s["tokensize"] = s_tok
+            s["first_100_chars"] = s_text.replace("\n", " ")[:100].strip()
+            sources_total_tokens += s_tok
+
         # Determine individual case status
         case_passed = ir["hit_rate_at_k"] >= 0.9 and gen["faithfulness"] >= 0.75 and gen["answer_correctness"] >= 0.5
         status_tag = "PASS" if case_passed else ("WARN" if ir["hit_rate_at_k"] >= 0.5 else "FAIL")
@@ -465,22 +478,32 @@ def run_evaluation(
             "test_id": tc["id"],
             "name": tc["name"],
             "query": tc["query"],
+            "query_tokensize": q_tokens,
+            "answer_tokensize": ans_tokens,
+            "answer_first_100_chars": ans_first_100,
             "latency_ms": round(latency_ms, 1),
             "sources_retrieved": len(sources),
+            "sources_tokensize": sources_total_tokens,
             "status": status_tag,
             "ir_metrics": ir,
             "gen_metrics": gen,
             "answer_preview": answer[:150] + ("..." if len(answer) > 150 else ""),
+            "sources": sources,
         }
         case_records.append(record)
 
         print(
-            f"[{status_tag:4s}] {tc['id']}: {tc['name'][:42]:42s} | "
+            f"[{status_tag:4s}] {tc['id']}: {tc['name'][:38]:38s} | "
+            f"Tokens: Q={q_tokens} A={ans_tokens} S={sources_total_tokens} | "
             f"Hit: {ir['hit_rate_at_k']*100:.0f}% | "
             f"Faith: {gen['faithfulness']*100:.0f}% | "
             f"Correct: {gen['answer_correctness']*100:.0f}% | "
             f"{latency_ms:6.1f}ms"
         )
+        print(f"       Ans first_100_chars: \"{ans_first_100}\"")
+        if sources:
+            top_s = sources[0]
+            print(f"       Top source ({top_s.get('document_name') or top_s.get('filename')}, Page {top_s.get('page_range') or 1}): \"{top_s.get('first_100_chars')}\"")
 
     # Calculate Macro Averages
     n = len(case_records)

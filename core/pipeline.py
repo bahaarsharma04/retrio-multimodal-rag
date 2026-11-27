@@ -559,6 +559,11 @@ def sync_document_chunks_to_db(
                     )
                     s.add(db_c)
             s.commit()
+            try:
+                from core.retriever import invalidate_bm25_cache
+                invalidate_bm25_cache(project_id)
+            except Exception:
+                pass
     except Exception as e:
         ingest_logger.warning(f"Notice: Background sync to PostgreSQL skipped: {e}")
 
@@ -579,6 +584,7 @@ def delete_source_document(project_id: str, filename: str) -> bool:
                 name_lower = f.name.lower()
                 if (
                     name_lower == fn_lower
+                    or name_lower.endswith(f"_{fn_lower}")
                     or name_lower == f"{fn_lower}.pipeline.json"
                     or name_lower == f"{fn_lower}.checkpoint.json"
                     or name_lower.startswith(f"{fn_lower}.")
@@ -605,6 +611,11 @@ def delete_source_document(project_id: str, filename: str) -> bool:
         ingest_logger.warning(f"Notice: Document record deletion from PostgreSQL skipped: {e}")
 
     ingest_logger.info(f"Source document '{filename}' and associated vectors deleted from Project: {project_id}")
+    try:
+        from core.retriever import invalidate_bm25_cache
+        invalidate_bm25_cache(project_id)
+    except Exception:
+        pass
     return True
 
 

@@ -27,9 +27,11 @@ def run_tests():
 
     # 0. Check Database
     db_ok = is_db_connected()
-    print(f"\n[1] Database Connectivity: {'CONNECTED (PostgreSQL)' if db_ok else 'FALLBACK (Local JSON)'}")
-    if db_ok:
-        init_db()
+    print(f"\n[1] Database Connectivity: {'CONNECTED (PostgreSQL)' if db_ok else 'FAILED (Disconnected)'}")
+    if not db_ok:
+        print("ERROR: PostgreSQL is required for security verification.", file=sys.stderr)
+        sys.exit(1)
+    init_db()
 
     # 1. Test Unauthenticated Access
     print("\n[2] Testing Unauthenticated Access Rejection (401 Unauthorized)...")

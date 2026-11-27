@@ -72,9 +72,9 @@ Before chunking, raw files are classified and normalized into canonical structur
 * **Sentence-Bounded Splitting with Overlap:** Large text blocks exceeding 1,500 characters are subdivided along complete sentence boundaries (`[.!?]\s+`) with a **250-character trailing sentence overlap** to maintain conceptual continuity across chunk boundaries.
 
 ### 3. Unified Single Database: PostgreSQL (`pgvector`)
-* **Single Database Architecture:** Unifies relational metadata (`projects`, `documents`, `conversations`, `messages`) and dense vectors (`document_chunks` with 1536-dimensional native `vector` column) inside PostgreSQL.
-* **Native Cosine Similarity (`<=>`):** Dense vector distance is computed directly in PostgreSQL using `pgvector` HNSW/IVFFlat indexes, eliminating separate external vector services or local ChromaDB databases.
-* **Strict Fail-Fast Single Source of Truth:** Direct connection to PostgreSQL is required. No fallbacks or duplicate vector silos.
+* **Single Database Architecture:** Unifies relational metadata (`projects`, `documents`, `conversations`, `messages`, `users`) and dense vectors (`document_chunks` with 1536-dimensional native `vector` column) inside PostgreSQL.
+* **Native Cosine Similarity (`<=>`) with HNSW Index:** Dense vector distance is computed directly in PostgreSQL using a pgvector HNSW index (`ix_document_chunks_embedding_hnsw`), providing sub-linear approximate nearest neighbor search and eliminating external vector DB silos.
+* **Strict Fail-Fast Architecture:** Direct connection to PostgreSQL is a mandatory requirement for Retrio. There is no offline JSON fallback for embeddings or vector search; all vector similarity and relational operations strictly require PostgreSQL with `pgvector` to ensure consistency and prevent data fragmentation.
 
 ### 4. Two-Stage Hybrid Retrieval & Neural Reranking
 * **Dense Semantic Search:** OpenAI `text-embedding-3-small` vectors searched via native PostgreSQL `pgvector` cosine similarity (`<=>`).
@@ -142,9 +142,15 @@ pip install -r requirements.txt
 ### 2. Configure Environment Variables
 Copy `.env.example` to `.env` and fill in your keys:
 ```env
+# Required API Keys & Database
 OPENAI_API_KEY=your-openai-api-key-here
-COHERE_API_KEY=your-cohere-api-key-here       # Optional: Free tier trial key
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/retrio_db
+JWT_SECRET_KEY=your-secure-random-32-byte-secret-hex-key
+
+# Optional Configurations
+COHERE_API_KEY=your-cohere-api-key-here       # Optional: For neural reranking
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost:8501,http://127.0.0.1:8501
+MAX_UPLOAD_SIZE_MB=25
 ```
 
 ### 3. Start Database (Docker)
@@ -154,8 +160,12 @@ docker compose up -d
 ```
 
 ### 4. Verification & Automated Testing Suite
-Run security checks and model accuracy evaluations after every code change:
+Run automated pytest tests and model accuracy evaluations:
 ```powershell
+# Run the automated pytest suite (Auth, RBAC, Upload Limits, BM25 Cache, Health):
+pytest -v
+
+# Run the standalone verification scripts:
 # 1. Security, JWT & RBAC Verification (Multi-tenancy, Admin Super-Visibility, Rate Limiting)
 .venv\Scripts\python.exe scripts\test_security_rbac.py
 

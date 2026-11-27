@@ -1,4 +1,5 @@
 import shutil
+import uuid
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File, Path as FPath, Request, Depends, status, BackgroundTasks
 from typing import Dict, Any
@@ -16,10 +17,53 @@ from core.pipeline import (
 from api.schemas import DocumentUploadAsyncResponse, DocumentStatusResponse
 from core.limiter import limiter
 from api.deps import get_current_active_user
+from core.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/documents", tags=["Knowledge Base & Ingestion"])
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".csv", ".txt", ".md"}
+
+
+def validate_file_content_signature(sample: bytes, ext: str) -> None:
+    """
+    Validates file content by inspecting its magic byte signature.
+    Prevents file type spoofing (e.g. executable or script masked with a .pdf or .csv extension).
+    """
+    if not sample:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty (0 bytes).",
+        )
+
+    if ext == ".pdf":
+        if not sample.startswith(b"%PDF-"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File content signature mismatch: claimed .pdf file does not start with valid %PDF- header.",
+            )
+    elif ext == ".docx":
+        if not sample.startswith(b"PK\x03\x04"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File content signature mismatch: claimed .docx file does not start with valid OpenXML/ZIP header.",
+            )
+    elif ext in {".txt", ".md", ".csv"}:
+        # Reject executable binaries disguised as text
+        if sample.startswith((b"MZ", b"\x7fELF", b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf")):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Security violation: binary executable signature detected in claimed text file ({ext}).",
+            )
+        try:
+            sample.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                sample.decode("latin-1")
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File content signature mismatch: {ext} file contains non-text or corrupted byte sequences.",
+                )
 
 
 @router.get("", summary="List all source documents in a project (ownership verified)")
@@ -73,6 +117,7 @@ async def upload_document(
         )
 
     safe_filename = Path(file.filename).name
+    stem = Path(safe_filename).stem
     ext = Path(safe_filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -80,13 +125,57 @@ async def upload_document(
             detail=f"Unsupported file format '{ext}'. Allowed: {list(ALLOWED_EXTENSIONS)}",
         )
 
+    # 1. Early Content-Length header check to reject oversized uploads immediately
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_UPLOAD_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File exceeds maximum allowed upload size of {MAX_UPLOAD_SIZE_MB}MB.",
+                )
+        except ValueError:
+            pass
+
     docs_dir = get_project_docs_dir(project_id)
     docs_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = docs_dir / safe_filename
 
-    # Save uploaded file safely to disk
-    with open(dest_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # 2. Prevent same-name overwrites on disk by storing under a generated unique ID
+    storage_id = uuid.uuid4().hex[:12]
+    stored_filename = f"{storage_id}_{safe_filename}"
+    dest_path = docs_dir / stored_filename
+
+    # 3. Stream uploaded file in chunks, validate magic bytes on first chunk, and enforce max size
+    chunk_size = 1024 * 1024  # 1MB chunk stream
+    total_bytes = 0
+    try:
+        with open(dest_path, "wb") as buffer:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                # Validate real file content signature on first chunk
+                if total_bytes == 0:
+                    validate_file_content_signature(chunk[:4096], ext)
+
+                total_bytes += len(chunk)
+                if total_bytes > MAX_UPLOAD_SIZE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds maximum allowed upload size of {MAX_UPLOAD_SIZE_MB}MB.",
+                    )
+                buffer.write(chunk)
+    except HTTPException:
+        if dest_path.exists():
+            dest_path.unlink()
+        raise
+    except Exception as e:
+        if dest_path.exists():
+            dest_path.unlink()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save uploaded file safely: {str(e)}",
+        )
 
     file_hash = sha256_file(dest_path)
 
