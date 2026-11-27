@@ -263,6 +263,13 @@ def dense_similarity_search(
     """
     _require_db_connection()
 
+    target_ids = [project_id]
+    try:
+        from core.projects import get_target_project_ids
+        target_ids = get_target_project_ids(project_id)
+    except Exception:
+        pass
+
     embedding_fn, _ = get_embedding_function()
     t0 = time.perf_counter()
 
@@ -273,7 +280,7 @@ def dense_similarity_search(
             s.query(DBDocumentChunk, DBDocument.filename, distance_col)
             .join(DBDocument, DBDocumentChunk.document_id == DBDocument.id)
             .filter(
-                DBDocumentChunk.project_id == project_id,
+                DBDocumentChunk.project_id.in_(target_ids),
                 DBDocumentChunk.embedding.isnot(None),
             )
         )
@@ -315,13 +322,21 @@ def dense_similarity_search(
 def get_all_chunks(project_id: str) -> List[Dict[str, Any]]:
     """
     Retrieves all indexed chunks and metadata for a project directly from PostgreSQL.
+    If the project uses the auditzo_compliance template, includes master template chunks.
     """
     _require_db_connection()
+    target_ids = [project_id]
+    try:
+        from core.projects import get_target_project_ids
+        target_ids = get_target_project_ids(project_id)
+    except Exception:
+        pass
+
     with get_db_session() as s:
         rows = (
             s.query(DBDocumentChunk, DBDocument.filename)
             .join(DBDocument, DBDocumentChunk.document_id == DBDocument.id)
-            .filter(DBDocumentChunk.project_id == project_id)
+            .filter(DBDocumentChunk.project_id.in_(target_ids))
             .order_by(DBDocumentChunk.chunk_index.asc())
             .all()
         )
@@ -347,9 +362,16 @@ def get_all_chunks(project_id: str) -> List[Dict[str, Any]]:
 def get_live_vector_count(project_id: str) -> int:
     """Returns the total number of indexed vectors for a project directly from PostgreSQL."""
     _require_db_connection()
+    target_ids = [project_id]
+    try:
+        from core.projects import get_target_project_ids
+        target_ids = get_target_project_ids(project_id)
+    except Exception:
+        pass
+
     with get_db_session() as s:
         return s.query(DBDocumentChunk).filter(
-            DBDocumentChunk.project_id == project_id,
+            DBDocumentChunk.project_id.in_(target_ids),
             DBDocumentChunk.embedding.isnot(None),
         ).count()
 

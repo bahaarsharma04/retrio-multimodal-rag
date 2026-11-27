@@ -71,7 +71,13 @@ def list_projects(owner_id: Optional[str] = None) -> List[Dict[str, Any]]:
     return _attach_owner_info(projects)
 
 
-def create_project(name: str, description: str = "", owner_id: Optional[str] = None) -> Dict[str, Any]:
+def create_project(
+    name: str,
+    description: str = "",
+    owner_id: Optional[str] = None,
+    template_type: str = "default",
+    is_master_template: bool = False,
+) -> Dict[str, Any]:
     """Creates a new project workspace directory and metadata record."""
     project_id = str(uuid.uuid4())
     pdir = PROJECTS_DIR / project_id
@@ -83,6 +89,8 @@ def create_project(name: str, description: str = "", owner_id: Optional[str] = N
         "owner_id": owner_id,
         "name": name.strip(),
         "description": description.strip(),
+        "template_type": template_type,
+        "is_master_template": is_master_template,
         "created_at": time.strftime("%d/%m/%Y"),
         "created_timestamp": time.time(),
     }
@@ -100,13 +108,18 @@ def create_project(name: str, description: str = "", owner_id: Optional[str] = N
                     name=name.strip(),
                     description=description.strip(),
                     owner_id=owner_id,
+                    template_type=template_type,
+                    is_master_template=is_master_template,
                 )
                 session.add(new_project)
                 session.commit()
         except Exception as e:
             app_logger.warning(f"Failed to save project to PostgreSQL: {e}")
 
-    app_logger.info(f"Project '{project_id}' (Name: '{name.strip()}', Owner: {owner_id}) created successfully.")
+    app_logger.info(
+        f"Project '{project_id}' (Name: '{name.strip()}', Owner: {owner_id}, "
+        f"Template: {template_type}, Master: {is_master_template}) created successfully."
+    )
     return project_data
 
 
@@ -185,3 +198,82 @@ def delete_project(project_id: str, owner_id: Optional[str] = None) -> bool:
 
     app_logger.info(f"Project '{project_id}' (Name: '{project_name}') and all associated vectors, documents, and chat records deleted.")
     return True
+
+
+def get_master_compliance_project_ids() -> List[str]:
+    """
+    Finds all Master Compliance project IDs.
+    Returns project IDs:
+    1. Where is_master_template == True and template_type == 'auditzo_compliance'
+    2. Or owned by adminzestminds@gmail.com with template_type == 'auditzo_compliance' or is_master_template == True
+    3. Or any project with template_type == 'auditzo_compliance' and is_master_template == True
+    """
+    master_ids = set()
+    if is_db_connected():
+        try:
+            with get_db_session() as session:
+                from db.models import User
+                admin = session.query(User).filter(User.email == "adminzestminds@gmail.com").first()
+                admin_id = admin.id if admin else None
+
+                # Projects explicitly marked as master template
+                p_masters = session.query(Project).filter(
+                    (Project.is_master_template == True) | (Project.owner_id == admin_id)
+                ).filter(
+                    (Project.template_type == "auditzo_compliance") | (Project.is_master_template == True)
+                ).all()
+
+                for p in p_masters:
+                    master_ids.add(p.id)
+        except Exception as e:
+            app_logger.warning(f"Error resolving master compliance project IDs: {e}")
+
+    # Fallback to local disk storage
+    if PROJECTS_DIR.exists():
+        for pdir in PROJECTS_DIR.iterdir():
+            if pdir.is_dir():
+                pfile = pdir / "project.json"
+                if pfile.exists():
+                    try:
+                        with open(pfile, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                            if d.get("is_master_template") or d.get("template_type") == "auditzo_compliance":
+                                master_ids.add(d.get("id"))
+                    except Exception:
+                        pass
+    return list(master_ids)
+
+
+def get_master_compliance_project_id() -> Optional[str]:
+    """Returns the primary master compliance project ID (preferably one with chunks)."""
+    pids = get_master_compliance_project_ids()
+    if not pids:
+        return None
+    # Prioritize project that has actual chunks
+    if is_db_connected():
+        try:
+            with get_db_session() as session:
+                from db.models import DocumentChunk
+                for pid in pids:
+                    count = session.query(DocumentChunk).filter(DocumentChunk.project_id == pid).count()
+                    if count > 0:
+                        return pid
+        except Exception:
+            pass
+    return pids[0]
+
+
+def get_target_project_ids(active_project_id: str) -> List[str]:
+    """
+    Returns the list of project IDs to search for retrieval.
+    If the active project was created with template_type == 'auditzo_compliance',
+    it includes ALL master compliance project IDs alongside the active project ID.
+    """
+    target_ids = [active_project_id]
+    proj = get_project(active_project_id)
+    if proj and proj.get("template_type") == "auditzo_compliance":
+        masters = get_master_compliance_project_ids()
+        for mid in masters:
+            if mid and mid not in target_ids:
+                target_ids.append(mid)
+    return target_ids

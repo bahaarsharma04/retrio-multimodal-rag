@@ -108,6 +108,8 @@ class LogoutResponse(BaseModel):
 class ProjectCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="Project workspace name")
     description: Optional[str] = Field("", description="Optional project description")
+    template_type: str = Field("default", description="Template type: 'default' or 'auditzo_compliance'")
+    is_master_template: bool = Field(False, description="Whether this project serves as a master template")
 
 
 class ProjectResponse(BaseModel):
@@ -116,6 +118,8 @@ class ProjectResponse(BaseModel):
     owner_email: Optional[str] = None
     name: str
     description: str
+    template_type: str = "default"
+    is_master_template: bool = False
     created_at: str
 
 

@@ -2,7 +2,13 @@ import re
 import uuid
 import streamlit as st
 
-from core.projects import list_projects, create_project, get_project, delete_project
+from core.projects import (
+    list_projects,
+    create_project,
+    get_project,
+    delete_project,
+    get_master_compliance_project_id,
+)
 from core.pipeline import (
     run_ingestion_pipeline,
     load_document_pipeline_data,
@@ -297,13 +303,40 @@ def new_project_dialog():
     st.caption("Start a new knowledge base project")
     p_name = st.text_input("Project Name *", placeholder="e.g., Research Analysis, GenAI Team...")
     p_desc = st.text_area("Description (optional)", placeholder="What will this project be about?")
-    user_id = st.session_state.current_user["id"] if st.session_state.get("current_user") else None
+
+    # Knowledge Base Template Dropdown
+    template_choice = st.selectbox(
+        "Knowledge Base Template",
+        options=["Default", "Auditzo Compliance"],
+        index=0,
+        help="Select 'Default' for a clean project, or 'Auditzo Compliance' to include master compliance knowledge."
+    )
+    template_type = "auditzo_compliance" if template_choice == "Auditzo Compliance" else "default"
+
+    user = st.session_state.get("current_user") or {}
+    user_id = user.get("id")
+    user_email = user.get("email", "")
+    is_admin = (user_email == "adminzestminds@gmail.com" or user.get("role") == "admin")
+
+    is_master_template = False
+    if is_admin:
+        is_master_template = st.checkbox(
+            "🌟 Mark as Master Template Project",
+            value=False,
+            help="Check this if this project will serve as the shared master source (e.g. Master Compliance, Master Teacher, etc.)."
+        )
 
     col_create, col_cancel = st.columns([1, 1])
     with col_create:
         if st.button("Create Project", type="primary", use_container_width=True):
             if p_name.strip():
-                new_proj = create_project(p_name.strip(), p_desc.strip(), owner_id=user_id)
+                new_proj = create_project(
+                    p_name.strip(),
+                    p_desc.strip(),
+                    owner_id=user_id,
+                    template_type=template_type,
+                    is_master_template=is_master_template,
+                )
                 st.session_state.active_project_id = new_proj["id"]
                 st.session_state.active_chat_id = str(uuid.uuid4())
                 st.session_state.current_chat_title = "New Chat"
@@ -909,6 +942,27 @@ def render_retrio_home(project_id: str):
                                 delete_source_document(project_id, sfile.name)
                                 st.success(f"Deleted `{sfile.name}`")
                                 st.rerun()
+
+            # Linked Master Knowledge Sources (for Auditzo Compliance projects)
+            active_proj = get_project(project_id)
+            if active_proj and active_proj.get("template_type") == "auditzo_compliance":
+                master_pid = get_master_compliance_project_id()
+                if master_pid and master_pid != project_id:
+                    m_docs_dir = get_project_docs_dir(master_pid)
+                    if m_docs_dir.exists():
+                        m_files = [
+                            f for f in m_docs_dir.iterdir()
+                            if f.is_file() and not f.name.endswith(".json")
+                        ]
+                        if m_files:
+                            st.markdown("---")
+                            st.markdown(
+                                "<div style='font-size:10px; color:#58a6ff; text-transform:uppercase; font-weight:700; margin-bottom:6px;'>"
+                                "🔒 Master Knowledge Sources (Auditzo Compliance)</div>",
+                                unsafe_allow_html=True,
+                            )
+                            for mf in m_files:
+                                st.caption(f"🛡️ `{mf.name}` *(Read-only)*")
 
 
 # ====================================================================

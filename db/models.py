@@ -59,6 +59,8 @@ class Project(Base):
     )
     name = Column(String(255), nullable=False)
     description = Column(Text, default="")
+    template_type = Column(String(50), default="default", nullable=False, index=True)
+    is_master_template = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -72,6 +74,8 @@ class Project(Base):
             "owner_id": self.owner_id,
             "name": self.name,
             "description": self.description,
+            "template_type": self.template_type or "default",
+            "is_master_template": bool(self.is_master_template),
             "created_at": self.created_at.strftime("%d/%m/%Y") if self.created_at else "",
             "created_timestamp": self.created_at.timestamp() if self.created_at else 0.0,
         }

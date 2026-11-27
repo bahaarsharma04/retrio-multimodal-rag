@@ -24,7 +24,13 @@ def create_new_project(
     current_user: Dict[str, Any] = Depends(get_current_active_user),
 ):
     """Creates a new project owned exclusively by the authenticated user."""
-    new_proj = create_project(payload.name, payload.description or "", owner_id=current_user["id"])
+    new_proj = create_project(
+        payload.name,
+        payload.description or "",
+        owner_id=current_user["id"],
+        template_type=payload.template_type,
+        is_master_template=payload.is_master_template,
+    )
     return new_proj
 
 

@@ -89,12 +89,9 @@ def get_cached_project_bm25(project_id: str, force_refresh: bool = False) -> Tup
 
 
 def invalidate_bm25_cache(project_id: Optional[str] = None) -> None:
-    """Invalidates the cached BM25 index for a project (or all projects)."""
+    """Invalidates the cached BM25 index for projects so master/shared updates reflect immediately."""
     global _PROJECT_BM25_CACHE
-    if project_id is None:
-        _PROJECT_BM25_CACHE.clear()
-    else:
-        _PROJECT_BM25_CACHE.pop(project_id, None)
+    _PROJECT_BM25_CACHE.clear()
 
 
 class HybridRetriever:
